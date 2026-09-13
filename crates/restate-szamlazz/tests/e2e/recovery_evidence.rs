@@ -81,7 +81,6 @@ async fn e2e_unresolved_storno_and_delete_do_not_repeat_an_interrupted_send() {
                     .bind(
                         order
                             .with_write_observer(hold.clone())
-                            .with_recovery_authorizer(Arc::new(Operator))
                             .into_service_definition()
                             .options(options),
                     )
@@ -183,7 +182,7 @@ async fn e2e_unresolved_storno_and_delete_do_not_repeat_an_interrupted_send() {
                 .invoke(&call, Some(&body), Some("blocked-after-kill"))
                 .await;
             assert_eq!(blocked.status, 500);
-            let evidence = json!({"marker":observed.body["marker"],"evidence":{"type":"completed","audit_reference":"confirmed-deletion","completion":{"type":"deleted","number":original},"completed_and_cannot_execute_later":true}});
+            let evidence = json!({"operator":"test-operator","marker":observed.body["marker"],"evidence":{"type":"completed","audit_reference":"confirmed-deletion","completion":{"type":"deleted","number":original},"completed_and_cannot_execute_later":true}});
             let recovered = restate
                 .invoke(
                     &Call::object("Szamlazz.Order", key, "recover"),
@@ -207,9 +206,9 @@ async fn e2e_unresolved_storno_and_delete_do_not_repeat_an_interrupted_send() {
 #[ignore = "needs RESTATE_SERVER_BIN; recorded recovery survives interruption"]
 #[allow(
     clippy::too_many_lines,
-    reason = "recovery command boundaries and revocation in one runtime"
+    reason = "recovery command boundaries and audit attribution in one runtime"
 )]
-async fn e2e_unresolved_recovery_replays_admission_and_recorded_evidence_before_clearing() {
+async fn e2e_unresolved_recovery_replays_operator_and_recorded_evidence_before_clearing() {
     use restate_szamlazz::service::WriteCheckpoint;
     let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
         return;
@@ -222,7 +221,6 @@ async fn e2e_unresolved_recovery_replays_admission_and_recorded_evidence_before_
         .await;
     let mock = MockServer::start().await;
     for (index, point) in [
-        WriteCheckpoint::RecoveryAuthorized,
         WriteCheckpoint::RecoveryVerified,
         WriteCheckpoint::RecoveryRecorded,
     ]
@@ -235,9 +233,6 @@ async fn e2e_unresolved_recovery_replays_admission_and_recorded_evidence_before_
             once: AtomicBool::new(false),
             reached: Notify::new(),
         });
-        let auth = Arc::new(AuthenticatedOperators(std::sync::Mutex::new(
-            std::collections::HashSet::from(["admitted".into()]),
-        )));
         let (order, _) = services_with_config(
             &mock.uri(),
             WorkerConfig::new("acct".parse().expect("namespace"))
@@ -256,7 +251,6 @@ async fn e2e_unresolved_recovery_replays_admission_and_recorded_evidence_before_
                     .bind(
                         order
                             .with_write_observer(hold.clone())
-                            .with_recovery_authorizer(auth.clone())
                             .into_service_definition()
                             .options(options),
                     )
@@ -303,32 +297,14 @@ async fn e2e_unresolved_recovery_replays_admission_and_recorded_evidence_before_
             .await_status(owner.invocation_id(), &["paused"])
             .await;
         restate.admin().kill(owner.invocation_id()).await;
-        let http = crate::common::http_client();
         let observe = Call::object("Szamlazz.Order", &key, "observe_unresolved");
-        let observed: serde_json::Value = http
-            .post(format!("{}{}", restate.ingress_url(), observe.path()))
-            .header("x-operator-assertion", "admitted")
-            .send()
-            .await
-            .expect("observe")
-            .json()
-            .await
-            .expect("marker");
+        let observed = restate.invoke(&observe, None, None).await;
         visible.store(true, Ordering::SeqCst);
-        let body = json!({"marker":observed["marker"],"evidence":{"type":"document","number":VENDOR_NUMBER}});
+        let operator = format!("support-operator-{index}");
+        let body = json!({"operator":operator,"marker":observed.body["marker"],"evidence":{"type":"document","number":VENDOR_NUMBER}});
         let call = Call::object("Szamlazz.Order", &key, "recover");
-        let submitted: serde_json::Value = http
-            .post(format!("{}{}", restate.ingress_url(), call.send().path()))
-            .header("x-operator-assertion", "admitted")
-            .header("Idempotency-Key", &key)
-            .json(&body)
-            .send()
-            .await
-            .expect("submit")
-            .json()
-            .await
-            .expect("invocation");
-        let id = submitted["invocationId"].as_str().expect("invocation id");
+        let submitted = restate.invoke(&call.send(), Some(&body), Some(&key)).await;
+        let id = submitted.invocation_id();
         tokio::time::timeout(Duration::from_secs(30), hold.reached.notified())
             .await
             .expect("recovery checkpoint");
@@ -339,25 +315,16 @@ async fn e2e_unresolved_recovery_replays_admission_and_recorded_evidence_before_
                 .iter()
                 .any(|entry| entry.entry_type.contains("ClearState"))
         );
-        // Revocation applies to new invocations, not the command prefix already admitted.
-        auth.0.lock().expect("registry").clear();
-        if point != WriteCheckpoint::RecoveryAuthorized {
-            visible.store(false, Ordering::SeqCst);
-        }
+        // Recorded document verification must suffice even after visibility changes.
+        visible.store(false, Ordering::SeqCst);
         restate.admin().resume(id).await;
-        let result = restate.invoke(&call, Some(&body), Some(&key)).await;
+        // Attaching to the same invocation retains its original audit attribution.
+        let mut changed = body.clone();
+        changed["operator"] = json!("different-operator");
+        let result = restate.invoke(&call, Some(&changed), Some(&key)).await;
         assert_eq!(result.status, 200, "{}", result.body);
-        assert_eq!(result.body["operator"], "authenticated-operator");
+        assert_eq!(result.body["operator"], operator);
         assert_eq!(result.body["evidence"], body["evidence"]);
-        let revoked = http
-            .post(format!("{}{}", restate.ingress_url(), call.path()))
-            .header("x-operator-assertion", "admitted")
-            .header("Idempotency-Key", format!("{key}-revoked"))
-            .json(&body)
-            .send()
-            .await
-            .expect("revoked operator call");
-        assert_eq!(revoked.status(), 403);
         let journal = restate.admin().journal(id).await;
         crate::write_commands::check_settled(&journal, "record-recovery");
         let recorded = journal
@@ -369,14 +336,14 @@ async fn e2e_unresolved_recovery_replays_admission_and_recorded_evidence_before_
             .find(|entry| entry.entry_type.contains("ClearState"))
             .expect("clear marker");
         assert!(recorded.index < cleared.index);
+        assert!(
+            restate_e2e_harness::run_result(&journal, "record-recovery")
+                .expect("recorded receipt")
+                .raw_contains(&operator)
+        );
         assert_eq!(
-            journal
-                .iter()
-                .filter(
-                    |entry| entry.is_run() && entry.name.as_deref() == Some("authorize-recovery")
-                )
-                .count(),
-            1
+            restate.invoke(&observe, None, None).await.body["state"],
+            "absent"
         );
     }
     mock.verify().await;
@@ -441,8 +408,7 @@ async fn e2e_unresolved_custom_opaque_account_values_remain_recoverable() {
             WorkerConfig::new("acct".parse().expect("namespace"))
                 .validate()
                 .expect("config"),
-        )
-        .with_recovery_authorizer(Arc::new(Operator));
+        );
         let options = restate_sdk::endpoint::ServiceOptions::default().handler(
             "create_invoice",
             restate_sdk::endpoint::HandlerOptions::default()
@@ -488,7 +454,7 @@ async fn e2e_unresolved_custom_opaque_account_values_remain_recoverable() {
         assert_eq!(observed.body["state"], "unresolved", "{}", observed.body);
         assert_eq!(observed.body["marker"]["account_id"], id);
         assert_eq!(observed.body["marker"]["credential_ref"], reference);
-        let evidence = json!({"marker":observed.body["marker"],"evidence":{"type":"completed","audit_reference":"vendor-support-confirmation","completion":{"type":"issued","number":"SZ-RECOVERED"},"completed_and_cannot_execute_later":true}});
+        let evidence = json!({"operator":"test-operator","marker":observed.body["marker"],"evidence":{"type":"completed","audit_reference":"vendor-support-confirmation","completion":{"type":"issued","number":"SZ-RECOVERED"},"completed_and_cannot_execute_later":true}});
         assert_eq!(
             restate
                 .invoke(
@@ -541,12 +507,7 @@ async fn e2e_unresolved_storno_requires_both_documents_to_carry_the_order() {
     restate
         .deploy(
             Endpoint::builder()
-                .bind(
-                    order
-                        .with_recovery_authorizer(Arc::new(Operator))
-                        .into_service_definition()
-                        .options(options),
-                )
+                .bind(order.into_service_definition().options(options))
                 .build(),
         )
         .await;
@@ -620,7 +581,7 @@ async fn e2e_unresolved_storno_requires_both_documents_to_carry_the_order() {
             observed.body
         );
         restate.admin().kill(owner.invocation_id()).await;
-        let evidence = json!({"marker":observed.body["marker"],"evidence":{"type":"document","number":storno}});
+        let evidence = json!({"operator":"test-operator","marker":observed.body["marker"],"evidence":{"type":"document","number":storno}});
         let refused = restate
             .invoke(
                 &Call::object("Szamlazz.Order", key, "recover"),
@@ -673,12 +634,7 @@ async fn e2e_unresolved_attestation_excludes_old_reissue_and_original_storno_num
     restate
         .deploy(
             Endpoint::builder()
-                .bind(
-                    order
-                        .with_recovery_authorizer(Arc::new(Operator))
-                        .into_service_definition()
-                        .options(options),
-                )
+                .bind(order.into_service_definition().options(options))
                 .build(),
         )
         .await;
@@ -764,7 +720,7 @@ async fn e2e_unresolved_attestation_excludes_old_reissue_and_original_storno_num
         let marker = restate.invoke(&observe, None, None).await.body["marker"].clone();
         restate.admin().kill(owner.invocation_id()).await;
         let recover = Call::object("Szamlazz.Order", key, "recover");
-        let mut request = json!({"marker":marker,"evidence":{"type":"completed","audit_reference":"AUDIT-302",
+        let mut request = json!({"operator":"test-operator","marker":marker,"evidence":{"type":"completed","audit_reference":"AUDIT-302",
             "completion":{"type":if reissue { "issued" } else { "reversed" },"number":original},
             "completed_and_cannot_execute_later":true}});
         assert_eq!(
@@ -924,12 +880,7 @@ async fn e2e_unresolved_duplicate_refusal_survives_failed_diagnostic_query() {
     restate
         .deploy(
             Endpoint::builder()
-                .bind(
-                    order
-                        .with_recovery_authorizer(Arc::new(Operator))
-                        .into_service_definition()
-                        .options(options),
-                )
+                .bind(order.into_service_definition().options(options))
                 .build(),
         )
         .await;
@@ -1069,12 +1020,7 @@ async fn e2e_unresolved_positive_settlement_matches_the_operation() {
     restate
         .deploy(
             Endpoint::builder()
-                .bind(
-                    order
-                        .with_recovery_authorizer(Arc::new(Operator))
-                        .into_service_definition()
-                        .options(options),
-                )
+                .bind(order.into_service_definition().options(options))
                 .build(),
         )
         .await;
@@ -1216,7 +1162,7 @@ async fn e2e_unresolved_positive_settlement_matches_the_operation() {
                     restate
                         .invoke(
                             &recover,
-                            Some(&json!({"marker":marker, "evidence":wrong})),
+                            Some(&json!({"operator":"test-operator","marker":marker, "evidence":wrong})),
                             None
                         )
                         .await
@@ -1229,7 +1175,7 @@ async fn e2e_unresolved_positive_settlement_matches_the_operation() {
                 );
             }
             // Absence remains insufficient even after the actual deletion.
-            assert_eq!(restate.invoke(&recover, Some(&json!({"marker":marker, "evidence":{"type":"document", "number":number}})), None).await.status, 500);
+            assert_eq!(restate.invoke(&recover, Some(&json!({"operator":"test-operator","marker":marker, "evidence":{"type":"document", "number":number}})), None).await.status, 500);
             correct
         } else {
             number_query(VENDOR_NUMBER_XML)
@@ -1252,10 +1198,10 @@ async fn e2e_unresolved_positive_settlement_matches_the_operation() {
                 )
                 .mount(&mock)
                 .await;
-            assert_eq!(restate.invoke(&recover, Some(&json!({"marker":marker, "evidence":{"type":"document", "number":"SS-WRONG"}})), None).await.status, 500);
+            assert_eq!(restate.invoke(&recover, Some(&json!({"operator":"test-operator","marker":marker, "evidence":{"type":"document", "number":"SS-WRONG"}})), None).await.status, 500);
             json!({"type":"document", "number":VENDOR_NUMBER})
         };
-        let request = json!({"marker":marker, "evidence":evidence});
+        let request = json!({"operator":"test-operator","marker":marker, "evidence":evidence});
         let settled = restate.invoke(&recover, Some(&request), None).await;
         assert_eq!(settled.status, 200, "{}", settled.body);
         assert_eq!(settled.body["operator"], "test-operator");

@@ -66,7 +66,6 @@ mod support;
 pub use body::Body;
 pub use handlers::{AgentClient, AgentIngressClient, OrderClient, OrderIngressClient};
 pub use ingress::decode_fault;
-pub use recovery::RecoveryAuthorizer;
 #[cfg(feature = "test-util")]
 pub use recovery::{WriteCheckpoint, WriteObserver};
 pub use support::FaultConversionError;
@@ -106,10 +105,12 @@ impl Parts {
 ///
 /// Same-key handlers run one at a time, which serialises issuing per order.
 /// The object's only state is the unresolved-write marker.
+/// The host authenticates and authorizes access, including operator access to
+/// `observe_unresolved` and `recover`, across ingress and internal SDK callers.
+/// Recovery records the host-supplied operator identity as audit attribution.
 #[derive(Clone)]
 pub struct Order {
     parts: Parts,
-    recovery_authorizer: Option<std::sync::Arc<dyn RecoveryAuthorizer>>,
     #[cfg(feature = "test-util")]
     write_observer: Option<std::sync::Arc<dyn WriteObserver>>,
 }
@@ -130,7 +131,6 @@ impl Order {
     pub fn from_parts(accounts: Accounts, config: ValidatedWorkerConfig) -> Self {
         Self {
             parts: Parts { accounts, config },
-            recovery_authorizer: None,
             #[cfg(feature = "test-util")]
             write_observer: None,
         }

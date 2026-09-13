@@ -26,11 +26,7 @@ async fn e2e_recovery_unreadable_state_blocks_every_mutation() {
             .expect("config"),
     );
     restate
-        .deploy(
-            Endpoint::builder()
-                .bind(order.with_recovery_authorizer(Arc::new(Operator)))
-                .build(),
-        )
+        .deploy(Endpoint::builder().bind(order).build())
         .await;
     for (index, corruption) in [
         "encoding",
@@ -128,7 +124,7 @@ async fn e2e_recovery_unreadable_state_blocks_every_mutation() {
         }
         // Supply a well-formed request so refusal comes from the stored bytes,
         // not the request decoder or an exact-marker comparison.
-        let body = json!({"marker":marker,"evidence":{"type":"document","number":"ISSUED"}});
+        let body = json!({"operator":"test-operator","marker":marker,"evidence":{"type":"document","number":"ISSUED"}});
         let reply = restate
             .invoke(
                 &Call::object("Szamlazz.Order", &key, "recover"),
@@ -139,10 +135,7 @@ async fn e2e_recovery_unreadable_state_blocks_every_mutation() {
         let fault: Fault = reply.fault();
         assert_eq!(fault.code, TerminalCode::OutcomeUnknown);
         assert!(fault.message.contains("unreadable"));
-        assert_eq!(
-            restate.admin().runs(reply.invocation_id()).await,
-            ["authorize-recovery"]
-        );
+        assert!(restate.admin().runs(reply.invocation_id()).await.is_empty());
         assert!(
             !restate
                 .admin()
@@ -198,7 +191,6 @@ async fn e2e_recovery_pins_account_and_replays_verification_without_credentials(
                 .bind(
                     order
                         .with_write_observer(hold.clone())
-                        .with_recovery_authorizer(Arc::new(Operator))
                         .into_service_definition()
                         .options(options),
                 )
@@ -257,7 +249,7 @@ async fn e2e_recovery_pins_account_and_replays_verification_without_credentials(
     let before_fetch = accounts.fetches("acme");
     let before_resolve = accounts.resolutions("acme");
     let call = Call::object("Szamlazz.Order", key, "recover").scoped("acme");
-    let body = json!({"marker":marker,"evidence":{"type":"document","number":"ISSUED"}});
+    let body = json!({"operator":"test-operator","marker":marker,"evidence":{"type":"document","number":"ISSUED"}});
     let recovery = restate
         .invoke(&call.send(), Some(&body), Some("pinned-recovery"))
         .await;

@@ -36,12 +36,7 @@ async fn e2e_contradictory_numbered_replies_retain_write_protection() {
     restate
         .deploy(
             Endpoint::builder()
-                .bind(
-                    order
-                        .with_recovery_authorizer(Arc::new(Operator))
-                        .into_service_definition()
-                        .options(options),
-                )
+                .bind(order.into_service_definition().options(options))
                 .build(),
         )
         .await;

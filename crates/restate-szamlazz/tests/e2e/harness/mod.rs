@@ -186,18 +186,6 @@ pub(crate) struct Harness {
     expected_unresolved: Mutex<BTreeSet<StateKey>>,
 }
 
-struct TestOperator;
-impl restate_szamlazz::service::RecoveryAuthorizer for TestOperator {
-    fn authorize(
-        &self,
-        _scope: Option<&str>,
-        order: &str,
-        _headers: &restate_sdk::context::HeaderMap,
-    ) -> Option<String> {
-        (order.starts_with("E2E-")).then(|| "test-operator".to_owned())
-    }
-}
-
 impl Harness {
     /// Join endpoint tasks before releasing their mock and assert no handler
     /// panic was hidden by a successful Restate retry.
@@ -256,7 +244,6 @@ impl Harness {
     /// the deployment with the server: a new URI is a new revision of both
     /// services, and new invocations route to it.
     async fn deploy(&self, order: Order, agent: Agent) {
-        let order = order.with_recovery_authorizer(Arc::new(TestOperator));
         let mut options = restate_sdk::endpoint::ServiceOptions::default();
         for handler in [
             "create_invoice",
@@ -330,7 +317,7 @@ impl Harness {
     }
 
     /// Settled scenarios must leave no Order state, before any test-only cleanup.
-    /// SQL also works for invalid/unauthorized order keys and adds no invocations.
+    /// SQL also works for invalid order keys and adds no invocations.
     pub(crate) async fn assert_state_absent(&self, scope: Option<&str>, key: &str) {
         check_inventory(&BTreeSet::new(), self.order_state(scope, key).await);
     }
@@ -395,7 +382,7 @@ impl Harness {
                 "delete" => json!({"type":"deleted","number":marker["operation"]["number"]}),
                 other => panic!("unexpected operation {other}"),
             };
-            let body = json!({"marker":marker,"evidence":{"type":"completed","audit_reference":format!("TEST-ONLY-SCRIPTED-SETTLEMENT-{key}"),"completion":completion,"completed_and_cannot_execute_later":true}});
+            let body = json!({"operator":"test-operator","marker":marker,"evidence":{"type":"completed","audit_reference":format!("TEST-ONLY-SCRIPTED-SETTLEMENT-{key}"),"completion":completion,"completed_and_cannot_execute_later":true}});
             let reply = self
                 .invoke(
                     &Call::object("Szamlazz.Order", key, "recover"),

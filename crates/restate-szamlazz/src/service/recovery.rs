@@ -41,8 +41,6 @@ pub enum WriteCheckpoint {
     Reconciled,
     /// After recorded settlement, before clearing the marker.
     Settled,
-    /// After recorded operator authorization, before reading its marker.
-    RecoveryAuthorized,
     /// After recorded document verification, before recording recovery.
     RecoveryVerified,
     /// After recorded recovery evidence, before clearing its marker.
@@ -62,22 +60,6 @@ fn journal<T: super::support::Journaled>(value: T) -> Json<T> {
     Json(value)
 }
 
-/// Host authorization for recovery, evaluated before marker observation or mutation.
-///
-/// The host must authenticate the caller at its ingress boundary and strip any
-/// caller-supplied identity assertions before passing trusted metadata. Restate
-/// request identity authenticates the runtime, not an operator. Internal SDK
-/// callers must meet the same policy. No authorizer is installed by default.
-pub trait RecoveryAuthorizer: Send + Sync {
-    /// Return the authenticated operator's audit identity, or deny access.
-    fn authorize(
-        &self,
-        scope: Option<&str>,
-        order: &str,
-        headers: &restate_sdk::context::HeaderMap,
-    ) -> Option<String>;
-}
-
 impl Order {
     /// Install test-only interruption control for this endpoint.
     #[cfg(feature = "test-util")]
@@ -86,42 +68,10 @@ impl Order {
         self.write_observer = Some(observer);
         self
     }
-    /// Enable operator recovery through a host-provided authorization boundary.
-    #[must_use]
-    pub fn with_recovery_authorizer(mut self, authorizer: Arc<dyn RecoveryAuthorizer>) -> Self {
-        self.recovery_authorizer = Some(authorizer);
-        self
-    }
-
-    pub(super) fn authorize_recovery(
-        &self,
-        scope: Option<&str>,
-        key: &str,
-        headers: &restate_sdk::context::HeaderMap,
-    ) -> Option<String> {
-        self.recovery_authorizer
-            .as_ref()
-            .and_then(|auth| auth.authorize(scope, key, headers))
-            .filter(|operator| !operator.trim().is_empty())
-    }
-
     pub(super) async fn observe_marker(
         &self,
         ctx: &SharedObjectContext<'_>,
     ) -> Result<UnresolvedObservation, HandlerError> {
-        let _operator = ctx
-            .run(|| async {
-                Ok(journal(self.authorize_recovery(
-                    ctx.scope(),
-                    ctx.key(),
-                    ctx.headers(),
-                )))
-            })
-            .name("authorize-recovery")
-            .await
-            .map_err(read_fault)?
-            .0
-            .ok_or_else(forbidden)?;
         let state = ctx.get::<bytes::Bytes>(STATE).await.map_err(read_fault)?;
         Ok(match state {
             None => UnresolvedObservation::Absent,
@@ -152,32 +102,13 @@ impl Order {
 
     #[allow(
         clippy::too_many_lines,
-        reason = "keep recovery authorization, evidence recording and state clearance in command order"
+        reason = "keep recovery evidence recording and state clearance in command order"
     )]
     async fn recover_marker_inner(
         &self,
         ctx: &ObjectContext<'_>,
         request: RecoveryRequest,
     ) -> Result<RecoveryResponse, HandlerError> {
-        let operator = ctx
-            .run(|| async {
-                Ok(journal(self.authorize_recovery(
-                    ctx.scope(),
-                    ctx.key(),
-                    ctx.headers(),
-                )))
-            })
-            .name("authorize-recovery")
-            .await
-            .map_err(read_fault)?
-            .0
-            .ok_or_else(forbidden)?;
-        #[cfg(feature = "test-util")]
-        if let Some(observer) = &self.write_observer {
-            observer
-                .reached(ctx.key(), WriteCheckpoint::RecoveryAuthorized)
-                .await;
-        }
         let raw = ctx
             .get::<bytes::Bytes>(STATE)
             .await
@@ -256,7 +187,7 @@ impl Order {
         }
         let receipt = RecoveryResponse {
             token: marker.token,
-            operator,
+            operator: request.operator,
             evidence: serde_json::to_value(evidence)
                 .map_err(|_| Fault::unavailable("could not encode recovery evidence"))?,
         };
@@ -528,11 +459,4 @@ fn read_fault(error: TerminalError) -> Fault {
             "could not read or record recovery evidence; inspect the unresolved marker",
         )
     }
-}
-
-fn forbidden() -> Fault {
-    Fault::new(
-        crate::contract::TerminalCode::Forbidden,
-        "operator recovery access denied",
-    )
 }

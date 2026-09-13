@@ -47,101 +47,6 @@ mod release_hardening;
 #[path = "contradictory_replies.rs"]
 mod contradictory_replies;
 
-struct Operator;
-impl restate_szamlazz::service::RecoveryAuthorizer for Operator {
-    fn authorize(
-        &self,
-        _scope: Option<&str>,
-        _order: &str,
-        _headers: &restate_sdk::context::HeaderMap,
-    ) -> Option<String> {
-        // This deployment is reachable only by this operator test process.
-        Some("test-operator".to_owned())
-    }
-}
-
-struct AuthenticatedOperators(std::sync::Mutex<std::collections::HashSet<String>>);
-impl restate_szamlazz::service::RecoveryAuthorizer for AuthenticatedOperators {
-    fn authorize(
-        &self,
-        _scope: Option<&str>,
-        _order: &str,
-        headers: &restate_sdk::context::HeaderMap,
-    ) -> Option<String> {
-        let assertion = headers.get("x-operator-assertion")?;
-        self.0
-            .lock()
-            .expect("operator admission registry")
-            .contains(assertion)
-            .then(|| "authenticated-operator".to_owned())
-    }
-}
-
-#[tokio::test]
-#[ignore = "needs RESTATE_SERVER_BIN; host operator admission boundary"]
-async fn e2e_unresolved_operator_boundary_refuses_spoofed_recovery() {
-    let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
-        return;
-    };
-    let restate = launcher
-        .launch(&ServerSpec {
-            name: "recovery-auth",
-            ..SERVER
-        })
-        .await;
-    let mock = MockServer::start().await;
-    let config = WorkerConfig::new("acct".parse().expect("namespace"))
-        .validate()
-        .expect("config");
-    let (order, _) = services_with_config(&mock.uri(), config);
-    let auth = Arc::new(AuthenticatedOperators(std::sync::Mutex::new(
-        std::collections::HashSet::new(),
-    )));
-    restate
-        .deploy(
-            Endpoint::builder()
-                .bind(order.with_recovery_authorizer(auth.clone()))
-                .build(),
-        )
-        .await;
-    let http = crate::common::http_client();
-    let observe = Call::object("Szamlazz.Order", "AUTH", "observe_unresolved");
-    let url = format!("{}{}", restate.ingress_url(), observe.path());
-    // A caller-supplied identity string is insufficient: only host-admitted
-    // assertions are accepted. Nothing in the request body admits an operator.
-    for assertion in [None, Some("spoofed-operator")] {
-        let mut request = http.post(&url);
-        if let Some(value) = assertion {
-            request = request.header("x-operator-assertion", value);
-        }
-        assert_eq!(request.send().await.expect("response").status(), 403);
-    }
-    auth.0
-        .lock()
-        .expect("registry")
-        .insert("host-admitted-session".into());
-    let response = http
-        .post(&url)
-        .header("x-operator-assertion", "host-admitted-session")
-        .send()
-        .await
-        .expect("response");
-    assert_eq!(response.status(), 200);
-    let marker = json!({"version":1,"token":"owner","owner_invocation":"owner","created_at":"2026-09-10T12:00:00Z","scope":null,"order":"AUTH","namespace":"acct","external_id":"acct:AUTH:invoice","account_id":"acct","endpoint":mock.uri(),"credential_ref":"acct","operation":{"type":"create","kind":"invoice","expected_number":null,"corrected_number":null}});
-    let recover = Call::object("Szamlazz.Order", "AUTH", "recover");
-    let body = json!({"marker":marker,"evidence":{"type":"not_executed","audit_reference":"INC-216","did_not_execute_and_cannot_execute_later":true}});
-    let response = http
-        .post(format!("{}{}", restate.ingress_url(), recover.path()))
-        .header("x-operator-assertion", "spoofed-operator")
-        .json(&body)
-        .send()
-        .await
-        .expect("response");
-    assert_eq!(response.status(), 403);
-    assert!(mock.received_requests().await.expect("requests").is_empty());
-    restate.finish().await;
-}
-
 struct InterruptAt {
     point: restate_szamlazz::service::WriteCheckpoint,
     once: AtomicBool,
@@ -254,7 +159,6 @@ async fn e2e_unresolved_interrupted_arm_and_open_send_never_regrant_permission()
                     .bind(
                         order
                             .with_write_observer(hold.clone())
-                            .with_recovery_authorizer(Arc::new(Operator))
                             .into_service_definition()
                             .options(options),
                     )
@@ -320,7 +224,7 @@ async fn e2e_unresolved_interrupted_arm_and_open_send_never_regrant_permission()
                 .await;
             assert_eq!(observed.body["state"], "unresolved");
             restate.admin().kill(submitted.invocation_id()).await;
-            let recovery = json!({"marker":observed.body["marker"],"evidence":{"type":"not_executed","audit_reference":"interrupted-before-send","did_not_execute_and_cannot_execute_later":true}});
+            let recovery = json!({"operator":"test-operator","marker":observed.body["marker"],"evidence":{"type":"not_executed","audit_reference":"interrupted-before-send","did_not_execute_and_cannot_execute_later":true}});
             assert_eq!(
                 restate
                     .invoke(
@@ -472,12 +376,7 @@ async fn e2e_unresolved_kill_preserves_marker_and_recovery_requires_evidence() {
         .expect("validated defaults");
     let (order, agent) = services_with_config(&mock.uri(), config);
     restate
-        .deploy(
-            Endpoint::builder()
-                .bind(order.with_recovery_authorizer(Arc::new(Operator)))
-                .bind(agent)
-                .build(),
-        )
+        .deploy(Endpoint::builder().bind(order).bind(agent).build())
         .await;
     let key = "MARKER-KILL";
     let pending = PendingSend::mount(&mock, key, "invoice").await;
@@ -553,7 +452,33 @@ async fn e2e_unresolved_kill_preserves_marker_and_recovery_requires_evidence() {
     assert_eq!(inventory["unfinished_invocations"], json!([]));
     assert_eq!(inventory["order_state"][0]["service_key"], key);
     assert!(inventory["order_state"][0]["scope"].is_null());
-    let mut request = json!({"marker":marker, "evidence":{"type":"not_executed","audit_reference":"INC-216","did_not_execute_and_cannot_execute_later":true}});
+    let mut request = json!({"operator":"test-operator","marker":marker, "evidence":{"type":"not_executed","audit_reference":"INC-216","did_not_execute_and_cannot_execute_later":true}});
+    for operator in [None, Some(json!(null)), Some(json!(" \t\u{2003}"))] {
+        let mut malformed = request.clone();
+        malformed
+            .as_object_mut()
+            .expect("request")
+            .remove("operator");
+        if let Some(operator) = operator {
+            malformed["operator"] = operator;
+        }
+        let refused = restate.invoke(&recover, Some(&malformed), None).await;
+        assert_eq!(refused.status, 400);
+        assert_eq!(
+            refused.fault::<restate_szamlazz::contract::Fault>().code,
+            restate_szamlazz::contract::TerminalCode::InvalidInput
+        );
+        let journal = restate.admin().journal(refused.invocation_id()).await;
+        assert!(
+            !journal
+                .iter()
+                .any(|entry| entry.is_run() || entry.entry_type.contains("State"))
+        );
+        assert_eq!(
+            restate.invoke(&observation, None, None).await.body["marker"],
+            marker
+        );
+    }
     request["marker"]["token"] = json!("stale");
     assert_eq!(
         restate.invoke(&recover, Some(&request), None).await.status,

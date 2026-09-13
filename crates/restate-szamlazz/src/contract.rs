@@ -114,8 +114,6 @@ use crate::identity::{ExternalId, OrderKey};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TerminalCode {
-    /// The host denied operator recovery access. HTTP 403.
-    Forbidden,
     /// Intentional cancellation during a read or account resolution. HTTP 409.
     /// No write was sent; cancellation does not authorize automatic retry.
     Cancelled,
@@ -167,8 +165,7 @@ pub enum TerminalCode {
 
 impl TerminalCode {
     /// Known codes, including intentional read cancellation.
-    pub const KNOWN: [Self; 9] = [
-        Self::Forbidden,
+    pub const KNOWN: [Self; 8] = [
         Self::Cancelled,
         Self::InvalidInput,
         Self::UnknownAccount,
@@ -183,7 +180,6 @@ impl TerminalCode {
     #[must_use]
     pub fn as_str(&self) -> &str {
         match self {
-            Self::Forbidden => "forbidden",
             Self::Cancelled => "cancelled",
             Self::OutcomeUnknown => "outcome_unknown",
             Self::Unavailable => "unavailable",
@@ -240,8 +236,7 @@ impl TerminalCode {
     pub const fn is_outcome_unknown(&self) -> Option<bool> {
         match self {
             Self::OutcomeUnknown | Self::Unavailable | Self::CredentialsRejected => Some(true),
-            Self::Forbidden
-            | Self::Cancelled
+            Self::Cancelled
             | Self::InvalidInput
             | Self::UnknownAccount
             | Self::NotFound
@@ -255,7 +250,6 @@ impl TerminalCode {
     #[must_use]
     pub const fn status(&self) -> Option<u16> {
         match self {
-            Self::Forbidden => Some(403),
             // The caller's request: the same request never succeeds.
             Self::InvalidInput | Self::UnknownAccount => Some(400),
             Self::NotFound => Some(404),
@@ -282,7 +276,6 @@ impl fmt::Display for TerminalCode {
 impl From<String> for TerminalCode {
     fn from(token: String) -> Self {
         match token.as_str() {
-            "forbidden" => Self::Forbidden,
             "cancelled" => Self::Cancelled,
             "outcome_unknown" => Self::OutcomeUnknown,
             "unavailable" => Self::Unavailable,
@@ -330,7 +323,7 @@ impl schemars::JsonSchema for TerminalCode {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "The worker fault code. Known values: forbidden (403), cancelled (409), invalid_input (400), unknown_account (400), not_found (404), szamlazz_error (422), outcome_unknown (500), unavailable (503), credentials_rejected (503). The last three mean the outcome is unknown. Cancellation does not authorize automatic retry. Other strings are preserved without an inferred HTTP status or outcome classification.",
+            "description": "The worker fault code. Known values: cancelled (409), invalid_input (400), unknown_account (400), not_found (404), szamlazz_error (422), outcome_unknown (500), unavailable (503), credentials_rejected (503). The last three mean the outcome is unknown. Cancellation does not authorize automatic retry. Other strings are preserved without an inferred HTTP status or outcome classification.",
         })
     }
 }
@@ -685,7 +678,6 @@ mod tests {
     #[test]
     fn terminal_code_tokens() {
         let expected = [
-            (TerminalCode::Forbidden, "forbidden", 403, false),
             (TerminalCode::Cancelled, "cancelled", 409, false),
             (TerminalCode::OutcomeUnknown, "outcome_unknown", 500, true),
             (TerminalCode::Unavailable, "unavailable", 503, true),
