@@ -30,6 +30,7 @@ use super::support::{
 };
 use crate::account::Account;
 use crate::contract::{ConflictReason, IssuedKind, StornoOutcome, StornoRequest, StornoResponse};
+use crate::gateway::document::ReportedDocument;
 use crate::gateway::{self, FoundDocument, QueryOutcome, StornoLookupOutcome, StornoStepRequest};
 use crate::identity::{ExternalId, Namespace, OrderKey};
 
@@ -122,6 +123,10 @@ impl StornoIntent {
 /// `Szamlazz.Agent.storno`'s [`unmanaged_storno_verdict`]), and the handler
 /// dispatches on it: proceed, read the storno number, or answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "short-lived decision carries the response directly"
+)]
 enum StornoVerdict {
     /// A live document the handler may reverse: on to the intent and the
     /// lookup step.
@@ -199,9 +204,12 @@ fn unmanaged_storno_verdict(found: &FoundDocument, number: &str) -> StornoVerdic
 
 /// The `reversed` answer of both storno handlers: `storno_number` as the
 /// read that named it did, absent when a best-effort read could not.
-fn reversed_response(number: &str, storno_number: Option<String>) -> StornoResponse {
+fn reversed_response(number: &str, storno: Option<ReportedDocument>) -> StornoResponse {
     let mut response = StornoResponse::new(StornoOutcome::Reversed, number);
-    response.storno_number = storno_number;
+    if let Some(storno) = storno {
+        response.storno_number = Some(storno.number);
+        response.storno_document_id = storno.document_id;
+    }
     response
 }
 
@@ -223,9 +231,16 @@ fn after_storno_lookup(
 ) -> Result<ControlFlow<StornoResponse>, Fault> {
     match outcome {
         StornoLookupOutcome::Absent => Ok(ControlFlow::Continue(())),
-        StornoLookupOutcome::AlreadyReversed { storno_number } => Ok(ControlFlow::Break(
-            reversed_response(number, Some(storno_number)),
-        )),
+        StornoLookupOutcome::AlreadyReversed {
+            storno_number,
+            storno_document_id,
+        } => Ok(ControlFlow::Break(reversed_response(
+            number,
+            Some(ReportedDocument {
+                number: storno_number,
+                document_id: storno_document_id,
+            }),
+        ))),
         StornoLookupOutcome::CredentialsRejected(answer) => {
             Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
         }
@@ -260,6 +275,7 @@ fn storno_response(
         gateway::StornoOutcome::Reversed(storno) => {
             let mut response = StornoResponse::new(StornoOutcome::Reversed, number)
                 .with_storno_number(storno.number);
+            response.storno_document_id = storno.document_id;
             if storno.notification_delivery_failed {
                 response
                     .warnings
@@ -267,9 +283,16 @@ fn storno_response(
             }
             response
         }
-        gateway::StornoOutcome::AlreadyReversed { storno_number } => {
-            StornoResponse::new(StornoOutcome::Reversed, number).with_storno_number(storno_number)
-        }
+        gateway::StornoOutcome::AlreadyReversed {
+            storno_number,
+            storno_document_id,
+        } => reversed_response(
+            &number,
+            Some(ReportedDocument {
+                number: storno_number,
+                document_id: storno_document_id,
+            }),
+        ),
         gateway::StornoOutcome::NotStornoable => StornoResponse::not_stornoable(
             number,
             "szamlazz.hu echoed the document unchanged: it cannot be reversed (only invoices can be stornoed)",
@@ -325,13 +348,15 @@ fn storno_outcome_unknown(error: &TerminalError) -> Fault {
 /// # Errors
 ///
 /// `credentials_rejected`; the caller attaches the storno's identity.
-fn storno_number_from_hint(
+fn storno_from_hint(
     outcome: QueryOutcome,
     number: &str,
     namespace: &Namespace,
-) -> Result<Option<String>, Fault> {
+) -> Result<Option<ReportedDocument>, Fault> {
     match outcome {
-        QueryOutcome::Found(found) if found.is_storno_of(number) => Ok(Some(found.number)),
+        QueryOutcome::Found(found) if found.is_storno_of(number) => {
+            Ok(Some(ReportedDocument::from(found.as_ref())))
+        }
         QueryOutcome::Found(_) | QueryOutcome::NotFound | QueryOutcome::Api(_) => Ok(None),
         QueryOutcome::CredentialsRejected(answer) => {
             Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
@@ -349,12 +374,18 @@ fn storno_number_from_hint(
 /// # Errors
 ///
 /// `credentials_rejected`.
-fn storno_number_from_lookup(
+fn storno_from_lookup(
     outcome: StornoLookupOutcome,
     namespace: &Namespace,
-) -> Result<Option<String>, Fault> {
+) -> Result<Option<ReportedDocument>, Fault> {
     match outcome {
-        StornoLookupOutcome::AlreadyReversed { storno_number } => Ok(Some(storno_number)),
+        StornoLookupOutcome::AlreadyReversed {
+            storno_number,
+            storno_document_id,
+        } => Ok(Some(ReportedDocument {
+            number: storno_number,
+            document_id: storno_document_id,
+        })),
         StornoLookupOutcome::Absent | StornoLookupOutcome::Api(_) => Ok(None),
         StornoLookupOutcome::CredentialsRejected(answer) => {
             Err(AnsweredCode::CredentialsRejected(answer).into_fault(namespace))
@@ -416,7 +447,7 @@ async fn storno_step<'ctx, C: RunCtx<'ctx>>(
 /// order-number hint is the `SS` referencing it (step `hint-storno-{number}`,
 /// a best-effort read under the read policy, [`run_best_effort`]). Rejected
 /// credentials are a fault about the storno (`storno_id`); everything else
-/// the hint can answer is data ([`storno_number_from_hint`]).
+/// the hint can answer is data ([`storno_from_hint`]).
 pub(super) async fn storno_number_of<'ctx, C: RunCtx<'ctx>>(
     ctx: &C,
     exec: &Execution,
@@ -424,6 +455,18 @@ pub(super) async fn storno_number_of<'ctx, C: RunCtx<'ctx>>(
     number: &str,
     storno_id: &ExternalId,
 ) -> Result<Option<String>, HandlerError> {
+    Ok(storno_of(ctx, exec, order, number, storno_id)
+        .await?
+        .map(|storno| storno.number))
+}
+
+async fn storno_of<'ctx, C: RunCtx<'ctx>>(
+    ctx: &C,
+    exec: &Execution,
+    order: &OrderKey,
+    number: &str,
+    storno_id: &ExternalId,
+) -> Result<Option<ReportedDocument>, HandlerError> {
     let hinted = order.clone();
     let Some(outcome) = run_best_effort(
         ctx,
@@ -435,7 +478,7 @@ pub(super) async fn storno_number_of<'ctx, C: RunCtx<'ctx>>(
     else {
         return Ok(None);
     };
-    storno_number_from_hint(outcome, number, &exec.config.namespace)
+    storno_from_hint(outcome, number, &exec.config.namespace)
         .map_err(|fault| fault.about(order, None, storno_id).into())
 }
 
@@ -446,12 +489,12 @@ pub(super) async fn storno_number_of<'ctx, C: RunCtx<'ctx>>(
 /// policy, [`run_best_effort`]). The only read that can name an unmanaged
 /// document's storno: it carries no order number for the hint. Rejected
 /// credentials are a fault; everything else is data
-/// ([`storno_number_from_lookup`]).
-async fn storno_number_of_unmanaged<'ctx, C: RunCtx<'ctx>>(
+/// ([`storno_from_lookup`]).
+async fn storno_of_unmanaged<'ctx, C: RunCtx<'ctx>>(
     ctx: &C,
     exec: &Execution,
     number: &crate::identity::InvoiceNumber,
-) -> Result<Option<String>, HandlerError> {
+) -> Result<Option<ReportedDocument>, HandlerError> {
     let external_id = ExternalId::for_unmanaged_storno(&exec.config.namespace, number);
     let looked_up = number.to_string();
     let Some(outcome) = run_best_effort(
@@ -464,7 +507,7 @@ async fn storno_number_of_unmanaged<'ctx, C: RunCtx<'ctx>>(
     else {
         return Ok(None);
     };
-    storno_number_from_lookup(outcome, &exec.config.namespace).map_err(Into::into)
+    storno_from_lookup(outcome, &exec.config.namespace).map_err(Into::into)
 }
 
 // ----- the two shells --------------------------------------------------------
@@ -533,7 +576,7 @@ impl Execution {
         if let ControlFlow::Break(response) =
             after_storno_lookup(looked_up, &number, namespace).map_err(about)?
         {
-            return Ok(response);
+            return Ok(response.with_invoice_document_id(found.document_id));
         }
 
         // Step 3: marker, acknowledged arm and one-use send permission.
@@ -561,7 +604,9 @@ impl Execution {
         };
 
         // Step 4: branch on data.
-        storno_response(outcome, number, namespace).map_err(|fault| about(fault).into())
+        storno_response(outcome, number, namespace)
+            .map(|response| response.with_invoice_document_id(found.document_id))
+            .map_err(|fault| about(fault).into())
     }
 
     /// Step 1 of the order's storno protocol: the document must be known,
@@ -585,12 +630,16 @@ impl Execution {
         let found = verified_document(found, number, namespace).map_err(about)?;
         match storno_verdict(&found, order, number) {
             StornoVerdict::Proceed => Ok(ControlFlow::Continue(found)),
-            StornoVerdict::Answered(response) => Ok(ControlFlow::Break(response)),
+            StornoVerdict::Answered(response) => Ok(ControlFlow::Break(
+                response.with_invoice_document_id(found.document_id),
+            )),
             StornoVerdict::AlreadyReversed => {
                 // Idempotent: already reversed by anyone. The storno number is
                 // best effort; a cancelled invocation propagates as such.
-                let storno_number = storno_number_of(ctx, self, order, number, storno_id).await?;
-                Ok(ControlFlow::Break(reversed_response(number, storno_number)))
+                let storno = storno_of(ctx, self, order, number, storno_id).await?;
+                Ok(ControlFlow::Break(
+                    reversed_response(number, storno).with_invoice_document_id(found.document_id),
+                ))
             }
         }
     }
@@ -622,15 +671,17 @@ impl Execution {
         let found = verified_document(found, &number, namespace)?;
         match unmanaged_storno_verdict(&found, &number) {
             StornoVerdict::Proceed => {}
-            StornoVerdict::Answered(response) => return Ok(response),
+            StornoVerdict::Answered(response) => {
+                return Ok(response.with_invoice_document_id(found.document_id));
+            }
             StornoVerdict::AlreadyReversed => {
                 // Idempotent: already reversed by anyone. The storno number is
                 // best effort: ours when a storno of ours holds the by-number
                 // storno id, unknown otherwise; a cancelled invocation
                 // propagates as such.
-                let storno_number =
-                    storno_number_of_unmanaged(ctx, self, &validated_number).await?;
-                return Ok(reversed_response(&number, storno_number));
+                let storno_number = storno_of_unmanaged(ctx, self, &validated_number).await?;
+                return Ok(reversed_response(&number, storno_number)
+                    .with_invoice_document_id(found.document_id));
             }
         }
         // The intent is a pure function of the verified document: a `telj`
@@ -647,7 +698,7 @@ impl Execution {
         // Step 2: lookup: a storno of ours already under the id.
         let looked_up = lookup_storno(ctx, self, &intent).await?;
         if let ControlFlow::Break(response) = after_storno_lookup(looked_up, &number, namespace)? {
-            return Ok(response);
+            return Ok(response.with_invoice_document_id(found.document_id));
         }
 
         // Step 3: the storno step, under the issue policy: query-first on
@@ -659,7 +710,9 @@ impl Execution {
             .map_err(|error| storno_outcome_unknown(&error))?;
 
         // Step 4: branch on data.
-        storno_response(outcome, number, namespace).map_err(Into::into)
+        storno_response(outcome, number, namespace)
+            .map(|response| response.with_invoice_document_id(found.document_id))
+            .map_err(Into::into)
     }
 }
 
@@ -1258,6 +1311,7 @@ mod tests {
 
         let ControlFlow::Break(response) = after_storno_lookup(
             StornoLookupOutcome::AlreadyReversed {
+                storno_document_id: None,
                 storno_number: "SS-1".to_owned(),
             },
             "SZ-1",
@@ -1315,6 +1369,7 @@ mod tests {
         };
 
         let response = respond(gateway::StornoOutcome::AlreadyReversed {
+            storno_document_id: None,
             storno_number: "SS-1".to_owned(),
         })
         .expect("data");
@@ -1405,9 +1460,12 @@ mod tests {
             ..Doc::new("SS-1", "SS")
         };
         assert_eq!(
-            storno_number_from_hint(QueryOutcome::Found(storno.boxed()), "SZ-1", &namespace)
+            storno_from_hint(QueryOutcome::Found(storno.boxed()), "SZ-1", &namespace)
                 .expect("data"),
-            Some("SS-1".to_owned())
+            Some(ReportedDocument {
+                number: "SS-1".to_owned(),
+                document_id: Some(924_307_338)
+            })
         );
         for not_its_storno in [
             // The reversed invoice itself is the newest document under the
@@ -1425,13 +1483,13 @@ mod tests {
             QueryOutcome::Api(SzamlazzAnswer::new("57", "Hibás számlaszám.")),
         ] {
             assert_eq!(
-                storno_number_from_hint(not_its_storno.clone(), "SZ-1", &namespace).expect("data"),
+                storno_from_hint(not_its_storno.clone(), "SZ-1", &namespace).expect("data"),
                 None,
                 "{not_its_storno:?}"
             );
         }
         rejected_body(
-            storno_number_from_hint(
+            storno_from_hint(
                 QueryOutcome::CredentialsRejected(rejected()),
                 "SZ-1",
                 &namespace,
@@ -1440,27 +1498,31 @@ mod tests {
         );
 
         assert_eq!(
-            storno_number_from_lookup(
+            storno_from_lookup(
                 StornoLookupOutcome::AlreadyReversed {
+                    storno_document_id: None,
                     storno_number: "SS-1".to_owned(),
                 },
                 &namespace,
             )
             .expect("data"),
-            Some("SS-1".to_owned())
+            Some(ReportedDocument {
+                number: "SS-1".to_owned(),
+                document_id: None
+            })
         );
         for unknown in [
             StornoLookupOutcome::Absent,
             StornoLookupOutcome::Api(SzamlazzAnswer::new("57", "Hibás számlaszám.")),
         ] {
             assert_eq!(
-                storno_number_from_lookup(unknown.clone(), &namespace).expect("data"),
+                storno_from_lookup(unknown.clone(), &namespace).expect("data"),
                 None,
                 "{unknown:?}"
             );
         }
         rejected_body(
-            storno_number_from_lookup(
+            storno_from_lookup(
                 StornoLookupOutcome::CredentialsRejected(rejected()),
                 &namespace,
             )
@@ -1473,7 +1535,13 @@ mod tests {
     /// read named it, or absent when that read could not name one.
     #[test]
     fn the_reversed_answer_carries_the_storno_number_when_known() {
-        let known = reversed_response("SZ-1", Some("SS-1".to_owned()));
+        let known = reversed_response(
+            "SZ-1",
+            Some(ReportedDocument {
+                number: "SS-1".to_owned(),
+                document_id: None,
+            }),
+        );
         assert_eq!(known.outcome, StornoOutcome::Reversed);
         assert_eq!(known.invoice_number, "SZ-1");
         assert_eq!(known.storno_number.as_deref(), Some("SS-1"));

@@ -746,6 +746,10 @@ async fn e2e_unresolved_attestation_excludes_old_reissue_and_original_storno_num
 
 #[tokio::test]
 #[ignore = "needs RESTATE_SERVER_BIN; automatic storno evidence fallback"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "paired fallback evidence and its retained result"
+)]
 async fn e2e_unresolved_storno_automatically_uses_hint_or_external_id_evidence() {
     let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
         return;
@@ -835,6 +839,8 @@ async fn e2e_unresolved_storno_automatically_uses_hint_or_external_id_evidence()
             .await;
         assert_eq!(reply.status, 200, "{}", reply.body);
         assert_eq!(reply.body["storno_number"], "SS-REAL");
+        assert_eq!(reply.body["invoice_document_id"], 924_307_338_i64);
+        assert_eq!(reply.body["storno_document_id"], 924_307_338_i64);
         if candidate {
             let journal = restate.admin().journal(reply.invocation_id()).await;
             assert!(

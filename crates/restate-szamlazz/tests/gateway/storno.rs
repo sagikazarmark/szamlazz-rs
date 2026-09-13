@@ -145,6 +145,7 @@ async fn numberless_storno_acknowledgement_requires_positive_reconciliation() {
             assert_eq!(
                 result,
                 Ok(StornoOutcome::AlreadyReversed {
+                    storno_document_id: Some(924_307_338),
                     storno_number: "SS-1".into()
                 })
             );
@@ -186,6 +187,7 @@ async fn storno_lookup_finds_our_storno_under_the_id() {
     assert_eq!(
         h.gateway.lookup_storno(&storno_id, "SZ-1").await,
         Ok(StornoLookupOutcome::AlreadyReversed {
+            storno_document_id: Some(924_307_338),
             storno_number: "SS-1".to_owned(),
         })
     );
@@ -550,6 +552,7 @@ async fn inconclusive_storno_identity_uses_external_id_reconciliation() {
                 assert_eq!(
                     outcome,
                     Ok(StornoOutcome::AlreadyReversed {
+                        storno_document_id: Some(924_307_338),
                         storno_number: "SS-1".to_owned(),
                     }),
                     "{label}"
@@ -648,7 +651,7 @@ async fn storno_rejections_are_typed() {
 fn describe_storno(outcome: &Result<StornoOutcome, Unconfirmed>) -> String {
     match outcome {
         Ok(StornoOutcome::Reversed(storno)) => format!("Reversed {}", storno.number),
-        Ok(StornoOutcome::AlreadyReversed { storno_number }) => {
+        Ok(StornoOutcome::AlreadyReversed { storno_number, .. }) => {
             format!("AlreadyReversed {storno_number}")
         }
         Ok(StornoOutcome::Api(answer)) => format!("Api {}", answer.code),
@@ -812,6 +815,7 @@ async fn storno_re_executed_after_a_lost_reply_finds_the_storno_and_sends_nothin
     assert_eq!(
         h.gateway.storno(storno_request(&storno_id)).await,
         Ok(StornoOutcome::AlreadyReversed {
+            storno_document_id: Some(924_307_338),
             storno_number: "SS-1".to_owned(),
         })
     );
@@ -848,6 +852,7 @@ async fn storno_lost_reply_whose_re_query_finds_the_storno_is_reversed() {
     assert_eq!(
         h.gateway.storno(storno_request(&storno_id)).await,
         Ok(StornoOutcome::AlreadyReversed {
+            storno_document_id: Some(924_307_338),
             storno_number: "SS-1".to_owned(),
         })
     );

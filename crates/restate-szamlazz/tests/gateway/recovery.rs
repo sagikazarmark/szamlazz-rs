@@ -373,7 +373,7 @@ async fn storno_discovery_uses_the_order_hint_only_after_external_id_absence() {
         .await
         .expect("answered discovery queries");
     assert!(
-        matches!(result, ReconciliationOutcome::Reversed { storno_number } if storno_number == "SS-1")
+        matches!(result, ReconciliationOutcome::Reversed { storno_number, storno_document_id: Some(924_307_338) } if storno_number == "SS-1")
     );
     assert_eq!(h.bodies().await.len(), 3);
     h.server.verify().await;

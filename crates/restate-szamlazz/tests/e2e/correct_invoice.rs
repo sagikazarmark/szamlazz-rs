@@ -88,6 +88,7 @@ pub(crate) async fn corrective_is_issued_under_its_correction_id(h: &Harness) {
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.body["outcome"], "issued", "{}", reply.body);
     assert_eq!(reply.body["invoice_number"], "HS-C1");
+    assert_eq!(reply.body["document_id"], 924_307_747_i64);
     assert_eq!(reply.body["kind"], "corrective");
     assert_eq!(reply.body["external_id"], "acct:E2E-C1:corrective:fix-1");
     h.assert_state_absent(None, "E2E-C1").await;
@@ -114,6 +115,7 @@ pub(crate) async fn corrective_is_issued_under_its_correction_id(h: &Harness) {
     assert_ne!(again.invocation_id(), reply.invocation_id());
     assert_eq!(again.body["outcome"], "already_issued", "{}", again.body);
     assert_eq!(again.body["invoice_number"], "HS-C1");
+    assert_eq!(again.body["document_id"], 924_307_338_i64);
     assert_eq!(
         h.admin().runs(again.invocation_id()).await,
         ["namespace", "account", "lookup-corrective"]

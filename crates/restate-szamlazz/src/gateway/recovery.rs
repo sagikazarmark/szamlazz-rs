@@ -49,6 +49,9 @@ pub enum ReconciliationOutcome {
     Reversed {
         /// The verified reversal document number.
         storno_number: String,
+        /// Provider record ID of the verified reversal, absent in older evidence.
+        #[serde(default)]
+        storno_document_id: Option<i64>,
     },
     /// No sufficient evidence. Absence cannot prove non-execution; queries also
     /// cannot establish deletion rather than consumption or a hidden holder.
@@ -71,7 +74,10 @@ impl ReconciliationOutcome {
 }
 
 enum StornoEvidence {
-    Verified(String),
+    Verified {
+        storno_number: String,
+        storno_document_id: Option<i64>,
+    },
     Inconclusive(&'static str),
 }
 
@@ -196,9 +202,13 @@ impl Gateway {
             Err(error) => Err(error),
         };
         match result {
-            Ok(StornoEvidence::Verified(storno_number)) => {
-                Ok(StornoLookupOutcome::AlreadyReversed { storno_number })
-            }
+            Ok(StornoEvidence::Verified {
+                storno_number,
+                storno_document_id,
+            }) => Ok(StornoLookupOutcome::AlreadyReversed {
+                storno_number,
+                storno_document_id,
+            }),
             Ok(StornoEvidence::Inconclusive(reason)) => Err(Unanswered::Transport(reason.into())),
             Err(error) => match error.answered()? {
                 super::Answer::CredentialsRejected(answer) => {
@@ -238,7 +248,10 @@ impl Gateway {
                 "original reversal and order identity are not established",
             ));
         }
-        Ok(StornoEvidence::Verified(found.number.clone()))
+        Ok(StornoEvidence::Verified {
+            storno_number: found.number.clone(),
+            storno_document_id: Some(found.document_id),
+        })
     }
 
     pub(crate) async fn protected_create(
@@ -275,8 +288,14 @@ impl Gateway {
             .lookup_order_storno(request.external_id, &marker.order, request.invoice_number)
             .await
         {
-            Ok(StornoLookupOutcome::AlreadyReversed { storno_number }) => {
-                return WriteResult::Storno(StornoOutcome::AlreadyReversed { storno_number });
+            Ok(StornoLookupOutcome::AlreadyReversed {
+                storno_number,
+                storno_document_id,
+            }) => {
+                return WriteResult::Storno(StornoOutcome::AlreadyReversed {
+                    storno_number,
+                    storno_document_id,
+                });
             }
             Ok(StornoLookupOutcome::Absent) => {}
             Ok(StornoLookupOutcome::Api(answer)) => {
@@ -358,9 +377,13 @@ impl Gateway {
                 } else {
                     CreateOutcome::Reversed(found)
                 }),
-                ReconciliationOutcome::Reversed { storno_number } => {
-                    WriteResult::Storno(StornoOutcome::AlreadyReversed { storno_number })
-                }
+                ReconciliationOutcome::Reversed {
+                    storno_number,
+                    storno_document_id,
+                } => WriteResult::Storno(StornoOutcome::AlreadyReversed {
+                    storno_number,
+                    storno_document_id,
+                }),
                 ReconciliationOutcome::Inconclusive { reason } => WriteResult::unresolved(reason),
                 ReconciliationOutcome::CredentialsRejected(answer) => WriteResult::Answered {
                     credentials: true,
@@ -462,9 +485,13 @@ impl Gateway {
             }
             WriteOperation::Storno { number } => {
                 match self.verify_order_storno(&found, order, number).await {
-                    Ok(StornoEvidence::Verified(storno_number)) => {
-                        ReconciliationOutcome::Reversed { storno_number }
-                    }
+                    Ok(StornoEvidence::Verified {
+                        storno_number,
+                        storno_document_id,
+                    }) => ReconciliationOutcome::Reversed {
+                        storno_number,
+                        storno_document_id,
+                    },
                     Ok(StornoEvidence::Inconclusive(reason)) => {
                         ReconciliationOutcome::inconclusive(reason)
                     }

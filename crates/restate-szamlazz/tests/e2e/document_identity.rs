@@ -297,6 +297,7 @@ async fn e2e_document_identity_retains_uncertainty_until_valid_evidence() {
             valid.store(true, Ordering::SeqCst);
             restate.admin().resume(owner.invocation_id()).await;
             let completed = restate.invoke(&call, Some(&body), Some(key)).await;
+            assert_eq!(completed.body["document_id"], 924_307_338_i64);
             assert_eq!(
                 completed.body["outcome"], "reconciled",
                 "{}",

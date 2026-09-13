@@ -20,6 +20,23 @@ use szamlazz_agent::{Date, DocumentType};
 use crate::contract::IssuedKind;
 use crate::identity::OrderKey;
 
+/// A reported document number and its optional provider record ID, kept together
+/// when a read needs no other document content. This is not settlement evidence.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ReportedDocument {
+    pub number: String,
+    pub document_id: Option<i64>,
+}
+
+impl From<&FoundDocument> for ReportedDocument {
+    fn from(found: &FoundDocument) -> Self {
+        Self {
+            number: found.number.clone(),
+            document_id: Some(found.document_id),
+        }
+    }
+}
+
 /// A queried document as the worker reads it: the projection of the Számla
 /// Agent crate's [`InvoiceDocument`] the document outcomes journal
 /// ([`LookupOutcome`](super::LookupOutcome), [`CreateOutcome`](super::CreateOutcome),

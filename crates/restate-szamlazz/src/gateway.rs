@@ -112,6 +112,7 @@ pub mod document;
 pub mod recovery;
 
 pub use build::{DocumentRefs, InputError};
+use document::ReportedDocument;
 pub use document::{FoundDocument, IssuedDocument, RecordedCreditEntry};
 pub use recovery::{ReconciliationOutcome, ReconciliationRequest};
 
@@ -838,6 +839,9 @@ pub enum StornoLookupOutcome {
     AlreadyReversed {
         /// The storno invoice number.
         storno_number: String,
+        /// Provider record ID of `storno_number`, when the query supplied it.
+        #[serde(default)]
+        storno_document_id: Option<i64>,
     },
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164); nothing
     /// may be concluded and nothing will be sent. See
@@ -917,6 +921,9 @@ pub enum StornoOutcome {
     AlreadyReversed {
         /// The storno invoice number.
         storno_number: String,
+        /// Provider record ID of `storno_number`; absent on number-only evidence.
+        #[serde(default)]
+        storno_document_id: Option<i64>,
     },
     /// szamlazz.hu answered success but echoed the requested number. This
     /// retains the no-op policy observed on proformas and delivery notes with
@@ -1807,7 +1814,13 @@ impl Gateway {
             .instrument(span)
             .await
         {
-            Ok(Some(storno_number)) => Ok(StornoLookupOutcome::AlreadyReversed { storno_number }),
+            Ok(Some(ReportedDocument {
+                number: storno_number,
+                document_id: storno_document_id,
+            })) => Ok(StornoLookupOutcome::AlreadyReversed {
+                storno_number,
+                storno_document_id,
+            }),
             Ok(None) => Ok(StornoLookupOutcome::Absent),
             Err(error) => match error.answered()? {
                 // `storno_seen` maps code 7 to `None`; the arm keeps the
@@ -1904,6 +1917,10 @@ impl Gateway {
         self.storno_send(request, None).await
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "keep the acknowledgement evidence and failure classification together"
+    )]
     async fn storno_send(
         &self,
         request: StornoStepRequest<'_>,
@@ -1957,13 +1974,15 @@ impl Gateway {
                                 )
                                 .await;
                             recovery::warn_reconciliation_credentials(&checked, marker);
-                            if matches!(
-                                checked,
-                                Ok(recovery::WriteResult::Storno(
-                                    StornoOutcome::AlreadyReversed { .. }
-                                ))
-                            ) {
-                                return Ok(StornoOutcome::Reversed(IssuedDocument::from(created)));
+                            if let Ok(recovery::WriteResult::Storno(
+                                StornoOutcome::AlreadyReversed {
+                                    storno_document_id, ..
+                                },
+                            )) = checked
+                            {
+                                let mut issued = IssuedDocument::from(created);
+                                issued.document_id = storno_document_id;
+                                return Ok(StornoOutcome::Reversed(issued));
                             }
                             return Err(Unconfirmed::StornoVerification { number: created.invoice_number.to_string(), message: "numbered reply needs positive identity and original reversal evidence".to_owned() });
                         }
@@ -2031,7 +2050,9 @@ impl Gateway {
                     && document.is_storno_of(request.invoice_number) =>
             {
                 tracing::info!(storno_number = %created.invoice_number, "storno identity verified");
-                return Ok(StornoOutcome::Reversed(IssuedDocument::from(created)));
+                let mut issued = IssuedDocument::from(created);
+                issued.document_id = Some(document.document_id);
+                return Ok(StornoOutcome::Reversed(issued));
             }
             Ok(document) => format!(
                 "queried {} with document type {} and original {:?}; expected a storno of {}",
@@ -2053,13 +2074,18 @@ impl Gateway {
         };
         let settled = self.storno_settle_or(request, unconfirmed).await?;
         if created.notification_delivery_failed
-            && matches!(&settled, StornoOutcome::AlreadyReversed { storno_number }
-            if storno_number == created.invoice_number.as_str())
+            && let StornoOutcome::AlreadyReversed {
+                storno_number,
+                storno_document_id,
+            } = &settled
+            && storno_number == created.invoice_number.as_str()
         {
             // The fallback established this exact acknowledged document. Keep
             // its already-reported notification warning; queries alone cannot
             // reconstruct it, nor attribute it to a different reversal.
-            return Ok(StornoOutcome::Reversed(IssuedDocument::from(created)));
+            let mut issued = IssuedDocument::from(created);
+            issued.document_id = *storno_document_id;
+            return Ok(StornoOutcome::Reversed(issued));
         }
         Ok(settled)
     }
@@ -2078,7 +2104,13 @@ impl Gateway {
             .storno_seen(request.external_id, request.invoice_number)
             .await
         {
-            Ok(Some(storno_number)) => Ok(StornoOutcome::AlreadyReversed { storno_number }),
+            Ok(Some(ReportedDocument {
+                number: storno_number,
+                document_id: storno_document_id,
+            })) => Ok(StornoOutcome::AlreadyReversed {
+                storno_number,
+                storno_document_id,
+            }),
             Ok(None) => Err(unconfirmed),
             Err(error) => {
                 if let QueryError::CredentialsRejected(answer) = &error {
@@ -2122,12 +2154,12 @@ impl Gateway {
         &self,
         external_id: &ExternalId,
         invoice_number: &str,
-    ) -> Result<Option<String>, QueryError> {
+    ) -> Result<Option<ReportedDocument>, QueryError> {
         let selector = InvoiceSelector::ExternalId(external_id.as_str().to_owned());
         match self.query_raw(selector).await {
             Ok(document) if document.is_storno_of(invoice_number) => {
                 tracing::info!(storno_number = %document.number, "storno already issued");
-                Ok(Some(document.number))
+                Ok(Some(ReportedDocument::from(&document)))
             }
             Ok(document) => {
                 tracing::warn!(
@@ -2444,10 +2476,16 @@ fn duplicate_refusal(kind: IssuedKind, answer: SzamlazzAnswer) -> CreateOutcome 
 /// Every other failure of the query, unchanged, for the caller to place, as
 /// [`settle_create`] hands them back.
 fn settle_storno(
-    seen: Result<Option<String>, QueryError>,
+    seen: Result<Option<ReportedDocument>, QueryError>,
 ) -> Result<Option<StornoOutcome>, QueryError> {
     match seen {
-        Ok(Some(storno_number)) => Ok(Some(StornoOutcome::AlreadyReversed { storno_number })),
+        Ok(Some(ReportedDocument {
+            number: storno_number,
+            document_id: storno_document_id,
+        })) => Ok(Some(StornoOutcome::AlreadyReversed {
+            storno_number,
+            storno_document_id,
+        })),
         Ok(None) => Ok(None),
         Err(QueryError::CredentialsRejected(answer)) => {
             Ok(Some(StornoOutcome::CredentialsRejected(answer)))
@@ -3035,8 +3073,12 @@ mod tests {
     #[test]
     fn the_storno_step_sends_only_when_no_storno_of_ours_is_under_the_id() {
         assert_eq!(
-            settle_storno(Ok(Some("SS-1".to_owned()))),
+            settle_storno(Ok(Some(ReportedDocument {
+                number: "SS-1".to_owned(),
+                document_id: None
+            }))),
             Ok(Some(StornoOutcome::AlreadyReversed {
+                storno_document_id: None,
                 storno_number: "SS-1".to_owned(),
             }))
         );

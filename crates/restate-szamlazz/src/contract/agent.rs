@@ -127,6 +127,10 @@ impl From<&RecordedCreditEntry> for CreditEntryRecord {
 pub struct QueryResponse {
     /// Document number (`számlaszám`).
     pub invoice_number: String,
+    /// Provider record ID (`alap/id`) of `invoice_number`. Optional for older
+    /// responses; a successful query supplies it in the resolved account.
+    #[serde(default)]
+    pub document_id: Option<i64>,
     /// Document type code (`tipus`): `SZ` invoice, `D` proforma, `ES`
     /// prepayment, `VS` final, `SS` storno, `HS` corrective, ….
     pub document_type: String,
@@ -193,6 +197,7 @@ impl QueryResponse {
     pub fn new(invoice_number: impl Into<String>, document_type: impl Into<String>) -> Self {
         Self {
             invoice_number: invoice_number.into(),
+            document_id: None,
             document_type: document_type.into(),
             reversed: None,
             referenced_invoice_number: None,
@@ -219,6 +224,7 @@ impl QueryResponse {
 impl From<&FoundDocument> for QueryResponse {
     fn from(document: &FoundDocument) -> Self {
         let mut response = Self::new(&document.number, document.document_type.as_wire());
+        response.document_id = Some(document.document_id);
         response.reversed = document.reversed;
         response
             .referenced_invoice_number
@@ -1022,6 +1028,7 @@ mod tests {
         let response = QueryResponse::from(&document);
 
         let mut expected = QueryResponse::new("SZ-1", "SZ");
+        expected.document_id = Some(924_307_338);
         expected.reversed = None;
         expected.referenced_invoice_number = Some("ES-1".to_owned());
         expected.referenced_proforma_number = Some("D-1".to_owned());

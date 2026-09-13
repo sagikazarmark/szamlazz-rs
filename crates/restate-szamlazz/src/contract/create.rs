@@ -493,6 +493,11 @@ pub struct CreateResponse {
     /// The document's number, when one exists.
     #[serde(default)]
     pub invoice_number: Option<String>,
+    /// Provider record ID of `invoice_number`, from the acknowledgement's
+    /// `szlahu_id` or a queried `alap/id`. Absent on number-only evidence;
+    /// never the ID of `storno_number` or `existing_number`.
+    #[serde(default)]
+    pub document_id: Option<i64>,
     /// The storno invoice number, when `outcome` is `reversed` and it is
     /// known.
     #[serde(default)]
@@ -544,6 +549,7 @@ impl CreateResponse {
             kind,
             external_id: external_id.into(),
             invoice_number: None,
+            document_id: None,
             storno_number: None,
             net_total: None,
             gross_total: None,

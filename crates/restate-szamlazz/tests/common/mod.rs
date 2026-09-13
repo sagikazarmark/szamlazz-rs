@@ -74,6 +74,8 @@ pub fn original_telj_tag() -> String {
 /// struct-update syntax and render with [`Doc::xml`] or [`Doc::response`].
 #[derive(Debug, Clone)]
 pub struct Doc<'a> {
+    /// Provider record ID (`alap/id`).
+    pub document_id: i64,
     /// `szamlaszam`.
     pub number: &'a str,
     /// `tipus`: `SZ`, `D`, `ES`, `VS`, `HS`, `SS`, …
@@ -180,6 +182,7 @@ impl<'a> Doc<'a> {
     /// the worker, reachable by number only.
     pub const fn unmanaged(number: &'a str, tipus: &'a str) -> Self {
         Self {
+            document_id: 924_307_338,
             number,
             tipus,
             order: None,
@@ -240,13 +243,14 @@ impl<'a> Doc<'a> {
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <szamla xmlns="http://www.szamlazz.hu/szamla">
   <szallito><id>{supplier}</id><nev>Seller</nev><cim><irsz>1111</irsz><telepules>Budapest</telepules><cim>Fő u. 1.</cim></cim></szallito>
-  <alap><id>924307338</id><szamlaszam>{number}</szamlaszam><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla>{hivszamlaszam}{hivdijbekszam}{kelt}{telj}{rendelesszam}{teszt}{sztornozott}{alap_extra}</alap>
+  <alap><id>{document_id}</id><szamlaszam>{number}</szamlaszam><tipus>{tipus}</tipus><eszamla>{eszamla}</eszamla>{hivszamlaszam}{hivdijbekszam}{kelt}{telj}{rendelesszam}{teszt}{sztornozott}{alap_extra}</alap>
   <vevo><nev>Buyer</nev></vevo>
   <tetelek></tetelek>
   <osszegek><totalossz><netto>{net}</netto><afa>{vat}</afa><brutto>{gross}</brutto></totalossz></osszegek>
   {credit_entries}
 </szamla>"#,
             supplier = self.supplier_id,
+            document_id = self.document_id,
             number = self.number,
             tipus = self.tipus,
             hivszamlaszam = opt("hivszamlaszam", self.referenced_invoice),

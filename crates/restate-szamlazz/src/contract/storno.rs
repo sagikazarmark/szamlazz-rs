@@ -246,9 +246,17 @@ pub struct StornoResponse {
     pub conflict_reason: Option<ConflictReason>,
     /// The invoice the request was about.
     pub invoice_number: String,
+    /// Provider record ID of the original `invoice_number`, from its verified
+    /// query (`alap/id`), never from a reversal acknowledgement.
+    #[serde(default)]
+    pub invoice_document_id: Option<i64>,
     /// The storno invoice number, when known.
     #[serde(default)]
     pub storno_number: Option<String>,
+    /// Provider record ID of `storno_number`, from its acknowledgement
+    /// (`szlahu_id`) or query (`alap/id`). Absent on number-only evidence.
+    #[serde(default)]
+    pub storno_document_id: Option<i64>,
     /// The `Order` key managing the document, when `outcome` is
     /// `managed_by_order`.
     #[serde(default)]
@@ -267,6 +275,13 @@ pub struct StornoResponse {
 }
 
 impl StornoResponse {
+    /// Sets the verified original's provider record ID.
+    #[must_use]
+    pub fn with_invoice_document_id(mut self, id: i64) -> Self {
+        self.invoice_document_id = Some(id);
+        self
+    }
+
     /// A response with the identity fields set and every optional field
     /// absent.
     pub fn new(outcome: StornoOutcome, invoice_number: impl Into<String>) -> Self {
@@ -274,7 +289,9 @@ impl StornoResponse {
             outcome,
             conflict_reason: None,
             invoice_number: invoice_number.into(),
+            invoice_document_id: None,
             storno_number: None,
+            storno_document_id: None,
             order_key: None,
             code: None,
             message: None,
@@ -605,6 +622,10 @@ impl OrderStatus {
 pub struct DocumentStatus {
     /// The document number.
     pub number: String,
+    /// Provider record ID (`alap/id`) of this `number`, when actually observed.
+    /// A synthesized consumed-proforma reference supplies no ID.
+    #[serde(default)]
+    pub document_id: Option<i64>,
     /// Whether it is live, reversed or (proformas) consumed.
     #[serde(flatten)]
     pub state: DocumentState,
@@ -634,6 +655,7 @@ impl DocumentStatus {
     pub fn new(number: impl Into<String>, state: DocumentState) -> Self {
         Self {
             number: number.into(),
+            document_id: None,
             state,
             gross: None,
             net: None,
