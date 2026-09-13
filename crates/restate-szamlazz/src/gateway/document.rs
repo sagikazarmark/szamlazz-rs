@@ -129,25 +129,46 @@ pub struct FoundDocument {
 
 /// A credit entry as szamlazz.hu records it against a document (`kifizetes`):
 /// the projection of the agent crate's
-/// [`RecordedCreditEntry`](query_xml::RecordedCreditEntry) with what
-/// `Szamlazz.Agent.query` shows of each entry. Crate-owned and journaled, like
-/// [`FoundDocument`].
+/// `RecordedCreditEntry` with what
+/// `Szamlazz.Agent.query` shows of each entry. The same crate-owned type is used
+/// by `FoundDocument` and `QueryResponse`.
+/// Optional metadata may be omitted when decoding response JSON; the Számla
+/// Agent projection supplies the date and title its parsed record carries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 pub struct RecordedCreditEntry {
     /// The payment date (`datum`).
-    pub date: Date,
+    #[serde(default)]
+    pub date: Option<Date>,
     /// The title (`jogcim`): the payment method it was settled by, as its
     /// wire token.
-    pub title: String,
+    #[serde(default)]
+    pub title: Option<String>,
     /// The amount (`osszeg`), in the document's currency.
     #[serde(deserialize_with = "crate::contract::decimal::required")]
     #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
     pub amount: Decimal,
     /// The free-text comment (`megjegyzes`).
+    #[serde(default)]
     pub comment: Option<String>,
     /// The bank account the payment arrived on (`bankszamlaszam`).
+    #[serde(default)]
     pub bank_account: Option<String>,
+}
+
+impl RecordedCreditEntry {
+    /// A record of `amount` with every optional field absent.
+    #[must_use]
+    pub const fn new(amount: Decimal) -> Self {
+        Self {
+            date: None,
+            title: None,
+            amount,
+            comment: None,
+            bank_account: None,
+        }
+    }
 }
 
 impl FoundDocument {
@@ -305,8 +326,8 @@ impl From<InvoiceDocument> for FoundDocument {
 impl From<query_xml::RecordedCreditEntry> for RecordedCreditEntry {
     fn from(entry: query_xml::RecordedCreditEntry) -> Self {
         Self {
-            date: entry.date,
-            title: entry.title.as_wire().to_owned(),
+            date: Some(entry.date),
+            title: Some(entry.title.as_wire().to_owned()),
             amount: entry.amount,
             comment: entry.comment,
             bank_account: entry.bank_account,
@@ -428,13 +449,13 @@ mod tests {
         let [first, second] = found.credit_entries.as_slice() else {
             panic!("two credit entries, got {:?}", found.credit_entries);
         };
-        assert_eq!(first.date, date(2026, 7, 10));
-        assert_eq!(first.title, "átutalás");
+        assert_eq!(first.date, Some(date(2026, 7, 10)));
+        assert_eq!(first.title.as_deref(), Some("átutalás"));
         assert_eq!(first.amount, dec!(10000));
         assert_eq!(first.comment.as_deref(), Some("first"));
         assert_eq!(first.bank_account.as_deref(), Some("1234-5678"));
-        assert_eq!(second.date, date(2026, 7, 11));
-        assert_eq!(second.title, "bankkártya");
+        assert_eq!(second.date, Some(date(2026, 7, 11)));
+        assert_eq!(second.title.as_deref(), Some("bankkártya"));
         assert_eq!(second.amount, dec!(5000));
         assert_eq!(second.comment, None);
         assert_eq!(second.bank_account, None);

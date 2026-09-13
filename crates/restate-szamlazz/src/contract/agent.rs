@@ -68,54 +68,6 @@ impl Selector {
     }
 }
 
-/// One registered credit entry as szamlazz.hu reports it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[non_exhaustive]
-pub struct CreditEntryRecord {
-    /// Payment date.
-    #[serde(default)]
-    pub date: Option<Date>,
-    /// Title / payment method text (`jogcím`).
-    #[serde(default)]
-    pub title: Option<String>,
-    /// Amount in the invoice currency.
-    #[serde(deserialize_with = "super::decimal::required")]
-    #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
-    pub amount: Decimal,
-    /// Free-text comment.
-    #[serde(default)]
-    pub comment: Option<String>,
-    /// Bank account the credit entry arrived on.
-    #[serde(default)]
-    pub bank_account: Option<String>,
-}
-
-impl CreditEntryRecord {
-    /// A record of `amount` with every optional field absent.
-    #[must_use]
-    pub const fn new(amount: Decimal) -> Self {
-        Self {
-            date: None,
-            title: None,
-            amount,
-            comment: None,
-            bank_account: None,
-        }
-    }
-}
-
-impl From<&RecordedCreditEntry> for CreditEntryRecord {
-    fn from(entry: &RecordedCreditEntry) -> Self {
-        let mut record = Self::new(entry.amount);
-        record.date = Some(entry.date);
-        record.title = Some(entry.title.clone());
-        record.comment.clone_from(&entry.comment);
-        record.bank_account.clone_from(&entry.bank_account);
-        record
-    }
-}
-
 /// Output of `Szamlazz.Agent.query`: a projection of the queried document,
 /// read off the `FoundDocument` the handler's one step journaled.
 /// Deliberately omits the seller block. The deploy-side go-live check is
@@ -174,7 +126,7 @@ pub struct QueryResponse {
     pub gross_total: Option<Decimal>,
     /// Registered credit entries.
     #[serde(default)]
-    pub credit_entries: Vec<CreditEntryRecord>,
+    pub credit_entries: Vec<RecordedCreditEntry>,
     /// Outstanding amount: gross total minus the sum of credit entries.
     /// Absent when gross is unknown or any intermediate sum or final subtraction
     /// cannot be represented exactly as a decimal.
@@ -240,11 +192,7 @@ impl From<&FoundDocument> for QueryResponse {
         response.net_total = Some(document.net_total);
         response.vat_total = Some(document.vat_total);
         response.gross_total = Some(document.gross_total);
-        response.credit_entries = document
-            .credit_entries
-            .iter()
-            .map(CreditEntryRecord::from)
-            .collect();
+        response.credit_entries.clone_from(&document.credit_entries);
         response.outstanding = outstanding(response.gross_total, &document.credit_entry_amounts());
         response.test = document.test;
         response
@@ -475,7 +423,7 @@ impl SetCreditEntriesRequest {
 }
 
 /// One credit entry (`jóváírás`) as the caller sends it: the input side of
-/// `CreditEntryRecord`, with the same words (`title`, `comment`).
+/// `RecordedCreditEntry`, with the same words (`title`, `comment`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -979,7 +927,7 @@ mod tests {
         response.net_total = Some(dec!(20000));
         response.vat_total = Some(dec!(5400));
         response.gross_total = Some(dec!(25400));
-        let mut entry = CreditEntryRecord::new(dec!(10000));
+        let mut entry = RecordedCreditEntry::new(dec!(10000));
         entry.date = Some(date(2026, 7, 10));
         entry.title = Some("átutalás".to_owned());
         response.credit_entries = vec![entry];
@@ -1040,22 +988,19 @@ mod tests {
         expected.net_total = Some(dec!(20000));
         expected.vat_total = Some(dec!(5400));
         expected.gross_total = Some(dec!(25400));
-        let mut first = CreditEntryRecord::new(dec!(10000));
+        let mut first = RecordedCreditEntry::new(dec!(10000));
         first.date = Some(date(2026, 7, 10));
         first.title = Some("átutalás".to_owned());
         first.comment = Some("first".to_owned());
         first.bank_account = Some("1234-5678".to_owned());
-        let mut second = CreditEntryRecord::new(dec!(5000));
+        let mut second = RecordedCreditEntry::new(dec!(5000));
         second.date = Some(date(2026, 7, 11));
         second.title = Some("bankkártya".to_owned());
         expected.credit_entries = vec![first, second];
         expected.outstanding = Some(dec!(10400));
         expected.test = Some(true);
         assert_eq!(response, expected);
-        assert_eq!(
-            CreditEntryRecord::from(&document.credit_entries[0]),
-            expected.credit_entries[0]
-        );
+        assert_eq!(document.credit_entries, expected.credit_entries);
     }
 
     #[test]
