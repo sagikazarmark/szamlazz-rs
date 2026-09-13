@@ -84,6 +84,7 @@ mod journaled {
         Namespace,
         Resolution,
         QueryOutcome,
+        QueryOutcome<crate::contract::QueryResponse>,
         OwnershipOutcome,
         LookupOutcome,
         CreateOutcome,

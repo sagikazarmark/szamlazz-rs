@@ -81,9 +81,9 @@ fn credit_entries_recovery(additive: bool) -> &'static str {
 /// the found document; 404 `not_found` on code 7; a credential code as
 /// `credentials_rejected`; any other szamlazz.hu code passed through as
 /// `szamlazz_error` (422), the code in `szamlazz_code`.
-fn query_response(outcome: QueryOutcome, namespace: &Namespace) -> Result<QueryResponse, Fault> {
+fn query_response<T>(outcome: QueryOutcome<T>, namespace: &Namespace) -> Result<T, Fault> {
     match outcome {
-        QueryOutcome::Found(found) => Ok(QueryResponse::from(&*found)),
+        QueryOutcome::Found(found) => Ok(*found),
         QueryOutcome::NotFound => Err(Fault::not_found(
             "szamlazz.hu does not know the document (code 7)",
         )),
@@ -200,8 +200,8 @@ impl Execution {
     }
 
     /// The `query` handler: one durable step (`query`) under the read policy
-    /// (the document as szamlazz.hu returned it, the same entry `verify`
-    /// writes), then the projection. The projection carries `test` (`teszt`)
+    /// journaling the response projection, including minimal buyer identity
+    /// and per-VAT subtotals. It carries `test` (`teszt`)
     /// as szamlazz.hu reported it, compared with nothing. Seller verification
     /// uses a direct Számla Agent query outside the journal.
     pub(super) async fn query_request(
@@ -339,15 +339,19 @@ mod tests {
     /// is `credentials_rejected`.
     #[test]
     fn query_answers_a_miss_as_not_found_and_passes_another_code_through() {
-        let (status, body) =
-            fault_body(query_response(QueryOutcome::NotFound, &namespace()).expect_err("a fault"));
+        let (status, body) = fault_body(
+            query_response::<crate::gateway::FoundDocument>(QueryOutcome::NotFound, &namespace())
+                .expect_err("a fault"),
+        );
         assert_eq!(status, 404, "{body}");
         assert_eq!(body["code"], "not_found", "{body}");
         assert_eq!(body["szamlazz_code"], serde_json::Value::Null, "{body}");
 
         let outcome = QueryOutcome::Api(SzamlazzAnswer::new("57", "Hibás számlaszám."));
-        let (status, body) =
-            fault_body(query_response(outcome, &namespace()).expect_err("a fault"));
+        let (status, body) = fault_body(
+            query_response::<crate::gateway::FoundDocument>(outcome, &namespace())
+                .expect_err("a fault"),
+        );
         assert_eq!(status, 422, "{body}");
         assert_eq!(body["code"], "szamlazz_error", "{body}");
         assert_eq!(body["szamlazz_code"], "57", "{body}");
@@ -363,8 +367,10 @@ mod tests {
             "3",
             "Sikertelen bejelentkezés.",
         ));
-        let (status, body) =
-            fault_body(query_response(outcome, &namespace()).expect_err("a fault"));
+        let (status, body) = fault_body(
+            query_response::<crate::gateway::FoundDocument>(outcome, &namespace())
+                .expect_err("a fault"),
+        );
         assert_eq!(status, 503, "{body}");
         assert_eq!(body["code"], "credentials_rejected", "{body}");
         assert_eq!(body["szamlazz_code"], "3", "{body}");

@@ -72,9 +72,9 @@ pub mod storno;
 pub use crate::gateway::RecordedCreditEntry;
 pub use agent::{
     CheckAccountResponse, CheckedAccount, CredentialsCheck, CreditEntryInput, InvalidTaxNumber,
-    MissingTaxpayerValidity, QueryRequest, QueryResponse, QueryTaxpayerRequest,
+    MissingTaxpayerValidity, QueryBuyer, QueryRequest, QueryResponse, QueryTaxpayerRequest,
     QueryTaxpayerResponse, Selector, SetCreditEntriesRequest, SetCreditEntriesResponse,
-    TaxpayerAddress,
+    TaxpayerAddress, VatTotal,
 };
 pub use create::{
     ConflictReason, CorrectRequest, CreateOptions, CreateOutcome, CreateRequest, CreateResponse,

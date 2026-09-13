@@ -20,6 +20,8 @@
 //!   queried document, none of which a handler reads (the reason the
 //!   outcomes carry [`FoundDocument`] / [`IssuedDocument`] rather than the
 //!   agent crate's types).
+//!   Explicit document queries additionally retain only their documented
+//!   buyer identity and per-VAT allowlist, never the full buyer block.
 //!
 //! The samples are built through the agent crate's parsers from wire XML
 //! and projected as the gateway projects them, since the agent's types are
@@ -219,6 +221,22 @@ fn entries() -> Vec<Entry> {
         ],
         &variants!(QueryOutcome { Found(_), NotFound, CredentialsRejected(_), Api(_) }),
     ));
+    // The explicit document query has its own journaled projection. Sample
+    // every answer with the same exhaustive variant check as ordinary reads.
+    {
+        use crate::contract::QueryResponse;
+        type DocumentQueryOutcome = QueryOutcome<QueryResponse>;
+        let response = QueryResponse::from(wire_document("SZ-1", false));
+        all.extend(entries_of(
+            vec![
+                DocumentQueryOutcome::Found(Box::new(response)),
+                DocumentQueryOutcome::NotFound,
+                DocumentQueryOutcome::CredentialsRejected(CREDENTIALS.answer()),
+                DocumentQueryOutcome::Api(API.answer()),
+            ],
+            &variants!(DocumentQueryOutcome { Found(_), NotFound, CredentialsRejected(_), Api(_) }),
+        ));
+    }
     all.extend(entries_of(vec![
             OwnershipOutcome::Absent,
             OwnershipOutcome::Live(document("SZ-1", false)),
@@ -672,7 +690,7 @@ async fn no_journal_entry_carries_the_agent_key() {
 
 /// The keys a `szamlazz_agent` response type would bring into a journal entry
 /// and the worker's projections leave out: the seller block, the buyer block
-/// (the buyer's name, addresses, email and tax numbers under it), the line
+/// (the explicit document query retains only minimal buyer identity), the line
 /// items, the financial items, the labels and the PDF of a queried document,
 /// and the PDF of a create reply. (The `Account`'s seller block carries an
 /// `email` block of its own: the operator's configuration, not a document's.)
@@ -700,11 +718,12 @@ fn keys_of(value: &Value, into: &mut BTreeSet<String>) {
 }
 
 /// No journal entry carries the document body: every sample serialises
-/// without any [`NEVER_JOURNALED`] key at any depth. The agent crate's own
+/// without any [`NEVER_JOURNALED`] key at any depth after checking and removing
+/// the explicit query's minimal buyer allowlist. The agent crate's own
 /// `InvoiceDocument`, serialised from the same wire XML, is the positive
 /// control: it carries every one of the keys, so the scan reads.
 #[test]
-fn no_journal_entry_carries_the_buyer_the_seller_the_items_or_the_pdf() {
+fn journal_entries_keep_only_the_document_query_buyer_allowlist() {
     let scan = |json: &str| -> Vec<&'static str> {
         let value: Value = serde_json::from_str(json).expect("json");
         let mut keys = BTreeSet::new();
@@ -725,7 +744,28 @@ fn no_journal_entry_carries_the_buyer_the_seller_the_items_or_the_pdf() {
     );
 
     for entry in entries() {
-        let carried = scan(&entry.json);
+        let mut value: Value = serde_json::from_str(&entry.json).expect("json");
+        if let Some(buyer) = value.get("Found").and_then(|found| found.get("buyer")) {
+            let mut keys = BTreeSet::new();
+            keys_of(buyer, &mut keys);
+            assert_eq!(
+                keys,
+                BTreeSet::from([
+                    "name".to_owned(),
+                    "tax_number".to_owned(),
+                    "eu_tax_number".to_owned()
+                ])
+            );
+            assert_eq!(
+                entry.type_name,
+                std::any::type_name::<QueryOutcome<crate::contract::QueryResponse>>()
+            );
+            value["Found"]
+                .as_object_mut()
+                .expect("found")
+                .remove("buyer");
+        }
+        let carried = scan(&value.to_string());
         assert!(
             carried.is_empty(),
             "{}: journals {carried:?}: {}",

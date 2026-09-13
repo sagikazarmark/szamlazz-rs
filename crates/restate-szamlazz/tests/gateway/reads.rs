@@ -118,7 +118,7 @@ async fn verify_query_and_hint() {
         .await
     {
         Ok(QueryOutcome::Found(found)) => {
-            assert_eq!(found.number, "SZ-1");
+            assert_eq!(found.invoice_number, "SZ-1");
             assert_eq!(found.credit_entries.len(), 2);
         }
         other => panic!("expected Found, got {other:?}"),

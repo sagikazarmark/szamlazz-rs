@@ -10,6 +10,9 @@
 //! the seller block, the line items, the PDF. What a document *is* to the
 //! worker (live, ours, a storno of a number, an e-invoice) is read here,
 //! once.
+//! An explicit [`Gateway::query`](super::Gateway::query)
+//! instead returns a query response with minimal buyer identity and per-VAT subtotals;
+//! it does not widen `FoundDocument` or the mutation lookup journals.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -175,11 +178,14 @@ impl FoundDocument {
     /// Validate identity before a queried document can become worker evidence.
     /// Vendor numbers retain their full spelling and are not subject to caller
     /// input bounds. Diagnostics never copy response text into the journal.
-    pub(super) fn validate_identity(&self, expected: Option<&str>) -> Result<(), &'static str> {
-        if self.number.trim().is_empty() {
+    pub(super) fn validate_identity(
+        number: &str,
+        expected: Option<&str>,
+    ) -> Result<(), &'static str> {
+        if number.trim().is_empty() {
             return Err("query: missing document number");
         }
-        if expected.is_some_and(|number| number != self.number) {
+        if expected.is_some_and(|expected| expected != number) {
             return Err("query: document number differs from the requested number");
         }
         Ok(())

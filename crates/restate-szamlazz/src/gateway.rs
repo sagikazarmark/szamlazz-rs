@@ -55,10 +55,11 @@
 //! [`ProbeOutcome`], [`TaxpayerOutcome`]) carry **crate-owned types, never a `szamlazz_agent`
 //! response type**: the document outcomes carry the worker's projections
 //! [`FoundDocument`] (of a queried `InvoiceDocument`) and [`IssuedDocument`]
-//! (of a create or storno reply), [`TaxpayerOutcome`] the crate-owned
-//! [`QueryTaxpayerResponse`]. A projection holds what the handlers read and
-//! nothing else: what the worker never reads of a document (the buyer block,
-//! the seller block, the line items, the PDF) is not in the journal, and the
+//! (of a create or storno reply), and [`crate::contract::QueryResponse`] for explicit
+//! document queries, including minimal buyer identity and per-VAT subtotals.
+//! [`TaxpayerOutcome`] carries the crate-owned [`QueryTaxpayerResponse`]. A projection
+//! holds only its documented allowlist: the full buyer block, seller block,
+//! line items and PDF are not in the journal, and the
 //! agent key never is. `service::journal` checks both on a sample of every
 //! variant, and that each round-trips through serde.
 //! Exchange diagnostics are projected too: `diagnostic` retains operation,
@@ -678,11 +679,13 @@ impl Unanswered {
 /// The answered result of a query by number, external id or order number
 /// ([`Gateway::verify`], [`Gateway::query`], [`Gateway::hint`]). A query
 /// szamlazz.hu did not answer is [`Unanswered`], never an outcome.
+/// The default projection is [`FoundDocument`] for internal document reads;
+/// [`Gateway::query`] uses [`crate::contract::QueryResponse`] for explicit queries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
-pub enum QueryOutcome {
-    /// The document.
-    Found(Box<FoundDocument>),
+pub enum QueryOutcome<T = FoundDocument> {
+    /// The document projection selected by the read.
+    Found(Box<T>),
     /// szamlazz.hu does not know the selector (code 7): unknown number, order
     /// number or external id, or a deleted / consumed proforma.
     NotFound,
@@ -1652,14 +1655,25 @@ impl Gateway {
     }
 
     /// Queries by any selector (also the `Szamlazz.Agent.query` handler's
-    /// one step).
+    /// one step). Returns document facts with minimal buyer identity and per-VAT
+    /// subtotals from the same read. Buyer data is current provider-returned
+    /// partner data; no buyer or VAT comparison is performed by the worker.
     ///
     /// # Errors
     ///
     /// [`Unanswered`] when the query got no answer; the caller's read policy
     /// re-executes the step.
-    pub async fn query(&self, selector: &Selector) -> Result<QueryOutcome, Unanswered> {
-        outcome(self.query_raw(invoice_selector(selector)).await)
+    pub async fn query(
+        &self,
+        selector: &Selector,
+    ) -> Result<QueryOutcome<crate::contract::QueryResponse>, Unanswered> {
+        outcome(
+            self.query_projected(
+                invoice_selector(selector),
+                crate::contract::QueryResponse::from,
+            )
+            .await,
+        )
     }
 
     /// Queries one of our external ids and validates what it holds against
@@ -2295,18 +2309,24 @@ impl Gateway {
     /// [`FoundDocument`] at this boundary: nothing past it holds the agent
     /// crate's document.
     async fn query_raw(&self, selector: InvoiceSelector) -> Result<FoundDocument, QueryError> {
+        self.query_projected(selector, FoundDocument::from).await
+    }
+
+    async fn query_projected<T>(
+        &self,
+        selector: InvoiceSelector,
+        project: impl FnOnce(szamlazz_agent::ops::query_xml::InvoiceDocument) -> T,
+    ) -> Result<T, QueryError> {
         let request = QueryInvoiceXml::new(selector);
         match self.client.send(&request).await {
             Ok(document) => {
-                let found = FoundDocument::from(document);
                 let expected = match &request.selector {
                     InvoiceSelector::InvoiceNumber(number) => Some(number.as_str()),
                     _ => None,
                 };
-                found
-                    .validate_identity(expected)
+                FoundDocument::validate_identity(document.info.invoice_number.as_str(), expected)
                     .map_err(|message| QueryError::Transport(message.to_owned()))?;
-                Ok(found)
+                Ok(project(document))
             }
             Err(ClientError::Api(api)) if api.code == ErrorCode::MissingData => {
                 Err(QueryError::NotFound)
@@ -2395,7 +2415,7 @@ fn is_foreign(found: &FoundDocument, our_numbers: &[String], seen: Option<&str>)
 
 /// A raw query result as the read's outcome: every answer is data, no answer
 /// is [`Unanswered`].
-fn outcome(result: Result<FoundDocument, QueryError>) -> Result<QueryOutcome, Unanswered> {
+fn outcome<T>(result: Result<T, QueryError>) -> Result<QueryOutcome<T>, Unanswered> {
     match result {
         Ok(document) => Ok(QueryOutcome::Found(Box::new(document))),
         Err(error) => Ok(match error.answered()? {
@@ -2929,26 +2949,26 @@ mod tests {
             Ok(QueryOutcome::Found(Box::new(document)))
         );
         assert_eq!(
-            outcome(Err(QueryError::NotFound)),
+            outcome::<FoundDocument>(Err(QueryError::NotFound)),
             Ok(QueryOutcome::NotFound)
         );
         assert_eq!(
-            outcome(Err(rejected())),
+            outcome::<FoundDocument>(Err(rejected())),
             Ok(QueryOutcome::CredentialsRejected(SzamlazzAnswer::new(
                 "3",
                 "Sikertelen bejelentkezés."
             )))
         );
         assert_eq!(
-            outcome(Err(other())),
+            outcome::<FoundDocument>(Err(other())),
             Ok(QueryOutcome::Api(SzamlazzAnswer::new("57", "Hibás XML.")))
         );
         assert_eq!(
-            outcome(Err(QueryError::Unavailable("szlahu_down".to_owned()))),
+            outcome::<FoundDocument>(Err(QueryError::Unavailable("szlahu_down".to_owned()))),
             Err(Unanswered::Unavailable("szlahu_down".to_owned()))
         );
         assert_eq!(
-            outcome(Err(QueryError::Transport("connection reset".to_owned()))),
+            outcome::<FoundDocument>(Err(QueryError::Transport("connection reset".to_owned()))),
             Err(Unanswered::Transport("connection reset".to_owned()))
         );
     }

@@ -100,6 +100,7 @@ mod multi_account;
 mod policies;
 mod privacy;
 mod prologue;
+mod query_document;
 mod storno;
 mod unresolved;
 mod write_commands;
@@ -420,6 +421,10 @@ async fn e2e_order_protocol() {
             faults::refusals_and_szamlazz_codes_travel_as_structured_faults,
             invariants::plant_the_leak_positive_control,
             privacy::diagnostics_are_safe_in_run_failures_journals_and_ingress,
+            query_document::query_preserves_buyer_and_vat_evidence,
+            query_document::omitted_evidence_and_equal_totals_do_not_fabricate_matches,
+            query_document::query_retains_and_replays_only_document_facts,
+            query_document::query_preserves_identity_and_fault_rules,
         ],
     );
     let (phase2, skipped2) = Only::select(

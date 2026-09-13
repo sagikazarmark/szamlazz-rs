@@ -519,6 +519,75 @@ answer. Not cached by the worker; cache it in the caller with a TTL on the order
 `contract::StornoRequest` / `StornoResponse` (`StornoOutcome`: `reversed`, `rejected`, `conflict`,
 `managed_by_order`, `unsupported_order_number`), `DeleteProformaRequest` / `DeleteProformaResponse`, `QueryRequest` (`Selector`) /
 `QueryResponse` and `SetCreditEntriesRequest` / `SetCreditEntriesResponse` are the remaining handler contracts.
+
+### Document query facts
+
+`Szamlazz.Agent.query` returns observed buyer identity and per-VAT subtotals alongside the document's
+other facts. The request selects a document:
+
+```json
+{
+  "selector": {"invoice_number": "SZ-2026-123"}
+}
+```
+
+The usual `QueryResponse` facts (number and record ID, type, order, references, dates, currency,
+net/VAT/gross totals, credit entries, outstanding, test and reversal markers) remain available. The
+same Számla Agent read supplies these **worker-owned fields** directly on the response:
+
+```json
+{
+  "buyer": {
+    "name": "Observed Buyer Kft.",
+    "tax_number": "12345678-2-42",
+    "eu_tax_number": "HU12345678"
+  },
+  "by_vat_rate": [
+    {"vat_type": null, "vat_rate_code": "27.0", "net": "100.00", "vat": "27.00", "gross": "127.00"},
+    {"vat_type": "AAM", "vat_rate_code": "0.0", "net": "10.00", "vat": "0", "gross": "10.00"}
+  ]
+}
+```
+
+**Retained data:** every explicit document query stores those three buyer fields and the per-rate rows alongside the usual
+query facts in the `query` Run result and response, visible in the Restate UI during their configured
+retention periods (the query handler requests one-day journal retention). It includes no full buyer block,
+seller block, addresses, email, partner identifier, items, raw XML or PDF. Order observations,
+mutation lookups and reconciliation keep their reduced `FoundDocument` projection.
+
+**Missing data and comparisons:** unreported domestic/EU tax numbers are `null`; no reported per-rate
+rows yields `by_vat_rate: []`. Neither is a fabricated match, a zero subtotal or an allocation inferred
+from the grand total. A reported zero row remains a row. Each row preserves its special `vat_type`
+separately from its numeric `vat_rate_code`, including unfamiliar tokens, and exact decimal amounts as
+strings. Rows retain provider order without regrouping or arithmetic repair. Compare the required
+evidence explicitly: equal grand gross does not imply equal allocation among VAT rates. Buyer name is
+the parsed provider name, not copied from the request; an empty name cannot establish a match to a
+known nonempty name.
+
+**Observation semantics:** queried buyer identity is current provider-returned partner data. Later
+activity can change what an earlier document returns; this is **not an immutable at-issuance buyer
+snapshot**. These facts support the caller's comparison policy; the worker performs no buyer or VAT
+comparison and adds no full-payload validation
+to worker ownership or reconciliation. A fresh observation needs a fresh invocation/`Idempotency-Key`:
+reusing a retained key returns the retained observation, and replay uses the recorded evidence.
+
+In Rust, construct `QueryRequest::new(selector)`. Read `QueryResponse.buyer: Option<QueryBuyer>` and
+`by_vat_rate: Vec<VatTotal>`. Successful queries supply the parsed buyer identity; older response JSON
+without these fields decodes with `buyer: None` and an empty breakdown, preserving unavailable data.
+Direct expert Gateway consumers use `query(&selector)`, which returns `QueryOutcome<QueryResponse>`;
+`verify` and `hint` retain `QueryOutcome<FoundDocument>` (also spelled `QueryOutcome`).
+Errors, account scope, identity validation and read policy are unchanged.
+
+Migration from the initial #227 implementation: remove `include_verification` (the closed request
+contract now rejects it), read `buyer` and `by_vat_rate` directly, and replace Gateway
+`query_with_verification` with `query`. Gateway query callers now receive `QueryResponse`, whose number
+field is `invoice_number`. Every explicit query journals this response projection instead of
+`FoundDocument`; Order read projections and step names are unchanged. Register a new immutable deployment.
+Exceptional replay requires review of the actual input and journal prefix under ADR 0009: the old
+query result shapes cannot be assumed compatible with this response projection.
+
+### Other contract details
+
 `DeleteReason` preserves unfamiliar strings in `Other(String)`, including vendor codes. The single
 wire string cannot distinguish a vendor code from a future worker reason; do not infer its origin.
 `Szamlazz.Agent.storno` returns `managed_by_order` only when the reported order number is a supported `OrderKey`.
@@ -1415,10 +1484,12 @@ one place.
 The same run checks what a `ctx.run` result may hold (`service::journal`): a sample of every variant of every
 journaled type round-trips through serde; none carries the agent key (an account resolved from configuration whose
 key is a sentinel, and the two `Lost` write outcomes from a gateway opened with the sentinel credentials, are
-scanned for it); and none carries the document body: no `supplier`, `buyer`, `items`, `financial_items`, `labels`
-or `pdf` key at any depth, since the document outcomes carry the worker's own projections
-(`gateway::document::{FoundDocument, IssuedDocument}`: what the handlers read of a queried document or a create
-reply) and a journal entry is shown in the Restate UI for the retention period.
+scanned for it); and none carries the full document body. Explicit queries journal `QueryOutcome<QueryResponse>`,
+including only the three-field `buyer` identity and per-VAT rows documented in [Document query facts](#document-query-facts).
+The scan checks that buyer allowlist before excluding it from the recursive forbidden-key check; no other
+`buyer`, `supplier`, `items`, `financial_items`, `labels` or `pdf` block may appear. Mutation, reconciliation and
+Order reads retain `FoundDocument`; create replies retain `IssuedDocument`. Every projection is worker-owned,
+and a journal entry is shown in the Restate UI for the retention period.
 
 There is no cross-version compatibility contract on the journal: a release is a new Restate deployment, and Restate
 replays an invocation only on the deployment that started it (ADR 0009, [*Deploying*](#deploying)), so a journaled type may
