@@ -279,6 +279,32 @@ services of its own also names `restate-sdk` as a direct dependency at the same 
 one build of the SDK); a crate that binds only `Order` and `Agent` needs the re-export alone. The workspace MSRV
 is Rust 1.92.
 
+### Read credit entries (#231 Rust migration)
+
+`gateway::RecordedCreditEntry` is the one worker-owned read-credit-entry type in
+both `FoundDocument.credit_entries` and `QueryResponse.credit_entries`, also
+re-exported as `contract::RecordedCreditEntry`. Replace imports of the removed
+`contract::CreditEntryRecord` (including `contract::agent::CreditEntryRecord`) with
+that type. `RecordedCreditEntry::new(amount)` constructs an entry with absent
+metadata. Its `date` and `title` fields change from `Date` / `String` to
+`Option<Date>` / `Option<String>`; callers reading them must handle `None`.
+
+The query JSON retains `date`, `title`, `amount`, `comment` and `bank_account`.
+Metadata remains optional on decoding, and absent values serialize as `null`.
+Amounts remain exact decimal strings on output and accept exactly representable
+strings or numbers on input. The Számla Agent projection still happens at the
+Gateway wire interface and supplies `Some(date)` and `Some(title)` from the parsed
+record. Entry ordering and the amount-based financial decisions are preserved.
+
+For journaled `FoundDocument` entries, populated date/title values keep their
+existing JSON shape; decoding now also permits omitted or null date/title metadata.
+No additional document content enters the journal. Deploy this release at a new,
+immutable endpoint and retain the original deployment for its invocations.
+Under [ADR 0009](../../docs/adr/0009-immutable-deployments-no-journal-compatibility-contract.md),
+exceptional replay requires reviewing the actual retained prefix, branch logic,
+exact commands, serialization and inputs against the candidate code. This local
+shape description is not a general cross-release replay guarantee.
+
 ## Scope Contract
 
 ### What `Szamlazz.Order` guarantees

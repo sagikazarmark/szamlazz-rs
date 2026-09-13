@@ -140,13 +140,13 @@ fn public_money_replays_from_json_text_bytes_and_sdk() {
         &["/amount"],
         token,
     );
-    check(&CreditEntryRecord::new(amount), &["/amount"], token);
+    check(&RecordedCreditEntry::new(amount), &["/amount"], token);
     let mut query = QueryResponse::new("SZ-1", "SZ");
     query.net_total = Some(amount);
     query.vat_total = Some(amount);
     query.gross_total = Some(amount);
     query.outstanding = Some(amount);
-    query.credit_entries = vec![CreditEntryRecord::new(amount)];
+    query.credit_entries = vec![RecordedCreditEntry::new(amount)];
     check(
         &query,
         &[
@@ -224,6 +224,20 @@ fn journal_money_replays_from_json_text_bytes_and_sdk() {
         ],
         token,
     );
+    let query = restate_szamlazz::contract::QueryResponse::from(&found);
+    assert_eq!(query.credit_entries, found.credit_entries);
+    assert_eq!(found.credit_entry_amounts(), [amount]);
+    assert_eq!(query.outstanding, Some(rust_decimal::Decimal::ZERO));
+    check(
+        &query,
+        &[
+            "/net_total",
+            "/vat_total",
+            "/gross_total",
+            "/credit_entries/0/amount",
+        ],
+        token,
+    );
     check(
         &gateway::QueryOutcome::Found(Box::new(found)),
         &[
@@ -243,6 +257,40 @@ fn journal_money_replays_from_json_text_bytes_and_sdk() {
 }
 
 mod common;
+
+#[test]
+fn read_credit_entries_decode_without_optional_metadata() {
+    use restate_szamlazz::{contract::QueryResponse, gateway::RecordedCreditEntry};
+    use rust_decimal::dec;
+    use serde_json::json;
+
+    for metadata in [
+        "",
+        r#", "date":null, "title":null, "comment":null, "bank_account":null"#,
+    ] {
+        for amount in ["9007199254740993.5", r#""9007199254740993.5""#] {
+            let text = format!(r#"{{"amount":{amount}{metadata}}}"#);
+            let entry: RecordedCreditEntry =
+                serde_json::from_str(&text).expect("optional metadata");
+            assert_eq!(entry.amount, dec!(9007199254740993.5));
+            assert_eq!(
+                serde_json::to_value(&entry).expect("encode"),
+                json!({
+                    "amount": "9007199254740993.5",
+                    "date": null, "title": null, "comment": null, "bank_account": null
+                })
+            );
+            check(&entry, &["/amount"], "9007199254740993.5");
+
+            let query: QueryResponse = serde_json::from_str(&format!(
+                r#"{{"invoice_number":"SZ-1","document_type":"SZ","credit_entries":[{text}]}}"#
+            ))
+            .expect("query with optional entry metadata");
+            assert_eq!(query.credit_entries, vec![entry]);
+            check(&query, &["/credit_entries/0/amount"], "9007199254740993.5");
+        }
+    }
+}
 
 #[cfg(feature = "schemars")]
 #[test]

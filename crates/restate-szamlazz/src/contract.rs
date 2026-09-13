@@ -68,9 +68,11 @@ pub mod document;
 pub mod recovery;
 pub mod storno;
 
+/// The worker-owned read credit entry, shared with found documents.
+pub use crate::gateway::RecordedCreditEntry;
 pub use agent::{
-    CheckAccountResponse, CheckedAccount, CredentialsCheck, CreditEntryInput, CreditEntryRecord,
-    InvalidTaxNumber, MissingTaxpayerValidity, QueryRequest, QueryResponse, QueryTaxpayerRequest,
+    CheckAccountResponse, CheckedAccount, CredentialsCheck, CreditEntryInput, InvalidTaxNumber,
+    MissingTaxpayerValidity, QueryRequest, QueryResponse, QueryTaxpayerRequest,
     QueryTaxpayerResponse, Selector, SetCreditEntriesRequest, SetCreditEntriesResponse,
     TaxpayerAddress,
 };
