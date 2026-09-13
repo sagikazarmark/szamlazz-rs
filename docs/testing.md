@@ -37,7 +37,7 @@ cargo hack check --workspace --feature-powerset --locked
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test -p xtask --locked --test migration
-bash scripts/check-money-features.sh
+dagger -c 'ci | money-features'
 dagger check
 ```
 
@@ -94,7 +94,7 @@ these checks assert worker behavior, not vendor atomicity (ADR 0015).
 
 ### Monetary dependency-graph regression
 
-Run `bash scripts/check-money-features.sh` from the workspace root when changing monetary Serde
+Run `dagger -c 'ci | money-features'` from the workspace root when changing monetary Serde
 boundaries or dependencies. It runs the focused Agent `decimal_serde`/`numeric_fidelity`, executable CLI
 `boundary` tests (including its direct `serde_ignored` JSON wrapper), IPN Serde,
 Adatkapcsolat `monetary_serialization`, and worker `decimal_input` and journal codec tests under eight
@@ -102,16 +102,16 @@ locked graphs: default, `rust_decimal/serde-float`, `rust_decimal/serde-arbitrar
 features together, and `serde-str` or `serde-bincode` combined with `serde-float`, each with and
 without arbitrary precision. Journal tests decode serialized bytes through the actual SDK codec;
 a prebuilt JSON `Value` round trip alone can hide feature-dependent text-decoding failures.
-It also prints the Agent's reverse Decimal feature tree for each graph. Cargo and the locked
-dependencies are required; a cold cache may fetch dependencies, but these tests contact no vendor.
+It also prints the Agent's reverse Decimal feature tree for each graph. The Dang function runs
+Cargo in the Rust module's container and fetches locked dependencies before the matrix; a cold
+cache may fetch dependencies, but these tests contact no vendor.
 
 The regression is that downstream feature unification must not change public monetary strings into
 floating-point or numeric serialization, or silently lose exact digits on round trip. The focused
 tests also exercise supported non-JSON formats and representable exponent inputs. A default workspace
 run or cargo-hack's package feature powerset alone does not establish these downstream graph cases.
-The script is wired automatically as `ci.money-features` in `dagger check`; the
-local command remains useful for focused verification. Run either tool's named
-Dagger check independently with:
+The function is included automatically as `ci.money-features` in `dagger check`.
+Run the monetary or migration check independently with:
 
 ```sh
 dagger -c 'ci | money-features'
