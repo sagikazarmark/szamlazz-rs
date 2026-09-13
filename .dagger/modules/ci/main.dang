@@ -69,12 +69,39 @@ type Ci {
   """
   Monetary Serde boundaries under downstream Decimal feature unification.
   Runs the eight locked dependency graphs, independently of the feature powerset.
+  Public money must remain strings, and replay must read them: serde-bincode
+  implies serde-str, whose combination with serde-float changes Decimal's
+  default text deserializer.
   """
   moneyFeatures: String! @check {
-    self.provisioned
+    let checked = self.provisioned
       .withExec(["cargo", "fetch", "--locked"])
-      .withExec(["bash", "scripts/check-money-features.sh"])
-      .combinedOutput
+    let output = ""
+    [
+      "",
+      "rust_decimal/serde-float",
+      "rust_decimal/serde-arbitrary-precision",
+      "rust_decimal/serde-float,rust_decimal/serde-arbitrary-precision",
+      "rust_decimal/serde-str,rust_decimal/serde-float",
+      "rust_decimal/serde-bincode,rust_decimal/serde-float",
+      "rust_decimal/serde-str,rust_decimal/serde-float,rust_decimal/serde-arbitrary-precision",
+      "rust_decimal/serde-bincode,rust_decimal/serde-float,rust_decimal/serde-arbitrary-precision",
+    ].each { features =>
+      let args: [String!]! = if (features == "") [] else ["--features", features]
+      [
+        ["cargo", "tree", "--locked", "-p", "szamlazz-agent", "-e", "features", "-i", "rust_decimal"],
+        ["cargo", "test", "--locked", "-p", "szamlazz-agent", "--test", "decimal_serde", "--test", "numeric_fidelity"],
+        ["cargo", "test", "--locked", "-p", "szamlazz-cli", "--test", "boundary"],
+        ["cargo", "test", "--locked", "-p", "szamlazz-ipn", "--features", "serde", "--lib"],
+        ["cargo", "test", "--locked", "-p", "szamlazz-adatkapcsolat", "--test", "monetary_serialization"],
+        ["cargo", "test", "--locked", "-p", "restate-szamlazz", "--features", "schemars", "--test", "decimal_input"],
+        ["cargo", "test", "--locked", "-p", "restate-szamlazz", "--lib", "service::journal::"],
+      ].each { command =>
+        checked = checked.withExec(command + args)
+        output = output + checked.combinedOutput
+      }
+    }
+    output
   }
 
   """
