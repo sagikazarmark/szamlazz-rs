@@ -35,6 +35,9 @@ mod recovery_boundaries;
 #[path = "document_identity.rs"]
 mod document_identity;
 
+#[path = "document_ids.rs"]
+mod document_ids;
+
 #[path = "protected_storno_evidence.rs"]
 mod protected_storno_evidence;
 

@@ -491,7 +491,7 @@ Otherwise it returns `UnsupportedOrderNumber` (`unsupported_order_number`), pres
 in the caller's system, without normalising the number or bypassing the order guard.
 
 `contract::OrderStatus` / `DocumentStatus` is the live view `get` returns: one optional `DocumentStatus` per kind
-(`number`, `state`, `gross`, `net`, `credit_entries`, `referenced_proforma`, `e_invoice`) with `DocumentState`
+(`number`, `document_id`, `state`, `gross`, `net`, `credit_entries`, `referenced_proforma`, `e_invoice`) with `DocumentState`
 flattened as `{state: live}`, `{state: reversed, storno_number}` or, for a consumed proforma,
 `{state: consumed, by}`. `get` never fills `storno_number` (finding the storno would take the order-number hint,
 which shows only the newest document); the create and storno handlers report it. A `null` slot is *nothing of
@@ -499,6 +499,37 @@ ours* under that external id, which may still be a foreign holder (a create ther
 `conflict{external_id_collision}`). Correctives are not in the view.
 `DocumentState::Other { state, fields }` preserves an unknown state and its payload fields;
 `DocumentState::KNOWN` lists `live`, `reversed` and `consumed`. Unknown states stay unclassified.
+
+### Provider document IDs
+
+Provider record IDs are optional JSON integers (`i64`, schema `int64`), correlated within the
+**resolved szamlazz.hu account**. Retain the scope/account mapping alongside an ID and its document
+number; the ID establishes neither account ownership nor global uniqueness across accounts. JSON
+consumers must preserve 64-bit integers exactly rather than round them through floating point.
+
+| Response field | Document association and source |
+|---|---|
+| Create/correct `document_id` | The returned `invoice_number`, including a corrective itself, from the acknowledgement's `szlahu_id` or a queried `alap/id`. Never the corrective base, `existing_number`, or `storno_number`. |
+| Query `document_id` | The queried `invoice_number`'s `alap/id`. |
+| Get slot `document_id` | That slot's `number`, from the actually observed document's `alap/id`, whether live or reversed. A synthesized consumed-proforma reference stays `null`; it cannot borrow the consuming invoice's ID. |
+| Order/Agent storno `invoice_document_id` | The original `invoice_number`'s verified `alap/id`, including already-reversed and pre-send domain responses. |
+| Order/Agent storno `storno_document_id` | The reversal `storno_number`'s `szlahu_id` or verified queried `alap/id`. Never attached to the original. |
+
+A fresh acknowledgement can omit `szlahu_id` or report an unreadable value: the ID is then `null`.
+Already-issued, reversed, and query-based reconciliation results carry the queried ID when their
+evidence supplies it. Storno lookup/hint results retain the reversal ID they observed; an unavailable
+best-effort hint leaves both reversal number and ID absent. Verification of an ambiguous acknowledgement
+uses the verified queried ID. Conflicts carrying only `existing_number` do not fill Create's `document_id`.
+Number-only evidence, older responses, and operator attestations supply no ID. Operator recovery receipts
+record their evidence, not an enriched Create/Storno response; subsequent calls report what their own
+observations establish.
+
+`null` means **not supplied by this outcome's evidence**, never zero or proof that the document does not
+exist. Older responses without the added fields decode as `None`. Completed replay retains the recorded
+optional values: no extra provider lookup or mutation is performed to fill metadata, and missing metadata
+does not authorize repeating a write. These fields are distinct from `external_id` (our discovery handle)
+and `customer_account_url` (acknowledgement-only buyer-facing account metadata). No document-detail URL is
+constructed from an ID, and recovery does not reconstruct the customer URL.
 
 ### Identity
 

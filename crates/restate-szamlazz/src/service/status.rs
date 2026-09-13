@@ -117,6 +117,7 @@ fn document_status(found: &FoundDocument) -> DocumentStatus {
         }
     };
     let mut status = DocumentStatus::new(&found.number, state);
+    status.document_id = Some(found.document_id);
     status.gross = Some(found.gross_total);
     status.net = Some(found.net_total);
     status.credit_entries = found.credit_entry_amounts();

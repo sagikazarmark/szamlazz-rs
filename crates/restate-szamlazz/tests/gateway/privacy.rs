@@ -63,7 +63,7 @@ async fn unmanaged_storno_alerts_before_fallback_can_discard_credentials() {
         let outcome = h.gateway.storno(storno_request(&id)).await;
         if verification_fails {
             assert!(
-                matches!(outcome, Ok(restate_szamlazz::gateway::StornoOutcome::AlreadyReversed { storno_number }) if storno_number == "SS-1")
+                matches!(outcome, Ok(restate_szamlazz::gateway::StornoOutcome::AlreadyReversed { storno_number, .. }) if storno_number == "SS-1")
             );
         } else {
             assert!(matches!(outcome, Err(Unconfirmed::ReQueryFailed { .. })));

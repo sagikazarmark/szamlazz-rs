@@ -53,6 +53,7 @@ async fn e2e_storno_email_uncertainty_resumes_read_only() {
         .respond_with(move |_: &wiremock::Request| {
             if seen.load(Ordering::SeqCst) {
                 Doc {
+                    document_id: 8_123_456_789,
                     referenced_invoice: Some("SZ-1"),
                     ..Doc::of("SS-1", "SS", "EMAIL")
                 }
@@ -101,6 +102,8 @@ async fn e2e_storno_email_uncertainty_resumes_read_only() {
         .await;
     assert_eq!(completed.body["outcome"], "reversed");
     assert_eq!(completed.body["storno_number"], "SS-1");
+    assert_eq!(completed.body["invoice_document_id"], 924_307_338_i64);
+    assert_eq!(completed.body["storno_document_id"], 8_123_456_789_i64);
     assert_eq!(
         completed.body["warnings"],
         json!([]),

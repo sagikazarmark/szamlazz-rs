@@ -261,6 +261,7 @@ fn entries() -> Vec<Entry> {
     all.extend(entries_of(vec![
             StornoLookupOutcome::Absent,
             StornoLookupOutcome::AlreadyReversed {
+                storno_document_id: None,
                 storno_number: "SS-1".to_owned(),
             },
             StornoLookupOutcome::CredentialsRejected(CREDENTIALS.answer()),
@@ -270,6 +271,7 @@ fn entries() -> Vec<Entry> {
             StornoOutcome::Reversed(storno_document()),
             StornoOutcome::Unnumbered { message: "storno acknowledged without a document number".to_owned() },
             StornoOutcome::AlreadyReversed {
+                storno_document_id: None,
                 storno_number: "SS-1".to_owned(),
             },
             StornoOutcome::NotStornoable,

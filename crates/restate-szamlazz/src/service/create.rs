@@ -73,6 +73,7 @@ impl Identity {
     fn found(&self, outcome: CreateOutcome, found: &FoundDocument) -> CreateResponse {
         let gross = Some(found.gross_total);
         let mut response = self.respond(outcome).with_invoice_number(&found.number);
+        response.document_id = Some(found.document_id);
         response.net_total = Some(found.net_total);
         response.gross_total = gross;
         response.outstanding = outstanding(gross, &found.credit_entry_amounts());
@@ -81,10 +82,11 @@ impl Identity {
     }
 
     /// `outcome: reversed` for `number`, reversed by `storno_number`.
-    fn reversed(&self, number: &str, storno_number: Option<String>) -> CreateResponse {
+    fn reversed(&self, found: &FoundDocument, storno_number: Option<String>) -> CreateResponse {
         let mut response = self
             .respond(CreateOutcome::Reversed)
-            .with_invoice_number(number);
+            .with_invoice_number(&found.number);
+        response.document_id = Some(found.document_id);
         response.storno_number = storno_number;
         response
     }
@@ -119,6 +121,7 @@ impl Identity {
                 let mut response = self
                     .respond(CreateOutcome::Issued)
                     .with_invoice_number(issued.number);
+                response.document_id = issued.document_id;
                 response.net_total = issued.net_total;
                 response.gross_total = issued.gross_total;
                 response.outstanding = issued.outstanding;
@@ -136,7 +139,7 @@ impl Identity {
             // `reversed`, and a new document needs an explicit `reissue`.
             // The storno number is not looked up here; the next call's lookup
             // reports it.
-            gateway::CreateOutcome::Reversed(found) => self.reversed(&found.number, None),
+            gateway::CreateOutcome::Reversed(found) => self.reversed(&found, None),
             // The document the lookup saw reversed is reported live: what
             // the lookup would have answered under `reissue`.
             gateway::CreateOutcome::LiveAgain(found) => {
@@ -531,7 +534,7 @@ fn decide_existing_target(
         }
         OwnershipOutcome::Live(found) => Some(identity.found(CreateOutcome::AlreadyIssued, &found)),
         OwnershipOutcome::Reversed(found) if reissue.is_none() => {
-            Some(identity.reversed(&found.number, None))
+            Some(identity.reversed(&found, None))
         }
         OwnershipOutcome::Collision(found) => {
             Some(identity.conflict_about(ConflictReason::ExternalIdCollision, found.number))
@@ -582,9 +585,7 @@ fn decide_lookup(
         LookupOutcome::Reversed {
             document,
             storno_number,
-        } if reissue.is_none() => {
-            ControlFlow::Break(identity.reversed(&document.number, storno_number))
-        }
+        } if reissue.is_none() => ControlFlow::Break(identity.reversed(&document, storno_number)),
         LookupOutcome::Reversed { document, .. } => ControlFlow::Continue(Some(document.number)),
         LookupOutcome::Collision(found) => ControlFlow::Break(
             identity.conflict_about(ConflictReason::ExternalIdCollision, found.number),
