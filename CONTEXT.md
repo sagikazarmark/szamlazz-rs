@@ -117,14 +117,15 @@ _Avoid_: payment (overloaded; reserve for the buyer's act, and the receipt's `Re
 The one worker-owned `gateway::RecordedCreditEntry`, also re-exported from `contract`, used by both `FoundDocument.credit_entries` and `QueryResponse.credit_entries`. Date and title are optional, like comment and bank account, so omitted response metadata remains decodable; the Számla Agent projection at the Gateway wire interface supplies its parsed date and title as `Some`. The amount retains exact decimal serialization and decoding. #231 removes the former query-only `CreditEntryRecord` and its second field-copy conversion; populated journal values keep their JSON shape, with omitted/null date and title newly decodable. The README's Rust migration notes apply ADR 0009 to exceptional replay.
 _Avoid_: `CreditEntryRecord` (the removed worker query-output copy), separate worker models for the same reported credit entry
 
-**Query verification evidence**:
-Opted-in provider-observed buyer identity and per-VAT subtotals associated with the document from the
+**Queried buyer identity and VAT subtotals**:
+Provider-observed buyer identity and per-VAT subtotals associated with the document from the
 same read. Special VAT category and numeric rate are distinct facts; equal grand totals do not establish
 equal allocation. Unreported identifiers or breakdowns establish neither matches nor zero totals.
 Buyer identity is current provider-returned partner data, not an immutable at-issuance snapshot.
 Comparison belongs to the caller's policy and does not broaden worker ownership or reconciliation
-into full-payload validation. #227; [caller contract](crates/restate-szamlazz/README.md#opt-in-document-verification-query).
-_Avoid_: buyer snapshot, grand-total equality as VAT-allocation equality, verification evidence as full-payload validation
+into full-payload validation. Explicit document queries retain these facts; mutation lookups and Order
+observations remain reduced. #227; [caller contract](crates/restate-szamlazz/README.md#document-query-facts).
+_Avoid_: buyer snapshot, grand-total equality as VAT-allocation equality, verification as a worker-provided verdict
 
 **Response version (válaszverzió)**:
 Agent request field selecting the response body format: 1 = plain text or raw PDF bytes, 2 = structured XML with base64 PDF. The crate requests `2` everywhere it has the choice, as the one constant `szamlazz_agent::ops::RESPONSE_VERSION`, so the pin is greppable (#184 (4)).

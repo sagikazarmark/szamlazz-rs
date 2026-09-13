@@ -9,7 +9,6 @@ use super::{
     CreateOutcome, DeleteOutcome, FoundDocument, Gateway, QueryError, QueryOutcome,
     StornoLookupOutcome, StornoOutcome, Unanswered,
 };
-use crate::contract::Selector;
 use crate::contract::recovery::UnresolvedWrite;
 pub use crate::contract::recovery::WriteOperation;
 use crate::identity::{ExternalId, OrderKey};
@@ -436,17 +435,23 @@ impl Gateway {
             if let Some(number) = candidate {
                 self.verify(number).await?
             } else {
-                match self
-                    .query(&Selector::ExternalId(external_id.to_owned()))
-                    .await?
-                {
+                match super::outcome(
+                    self.query_raw(szamlazz_agent::InvoiceSelector::ExternalId(
+                        external_id.to_owned(),
+                    ))
+                    .await,
+                )? {
                     QueryOutcome::NotFound => self.hint(order).await?,
                     outcome => outcome,
                 }
             }
         } else {
-            self.query(&Selector::ExternalId(external_id.to_owned()))
-                .await?
+            super::outcome(
+                self.query_raw(szamlazz_agent::InvoiceSelector::ExternalId(
+                    external_id.to_owned(),
+                ))
+                .await,
+            )?
         };
         let found = match queried {
             QueryOutcome::Found(found) => found,

@@ -200,9 +200,8 @@ impl Execution {
     }
 
     /// The `query` handler: one durable step (`query`) under the read policy
-    /// (the reduced document, the same entry `verify` writes), then the
-    /// projection. Opted-in verification reads journal the response projection
-    /// with its explicit buyer/per-VAT allowlist instead. Both carry `test` (`teszt`)
+    /// journaling the response projection, including minimal buyer identity
+    /// and per-VAT subtotals. It carries `test` (`teszt`)
     /// as szamlazz.hu reported it, compared with nothing. Seller verification
     /// uses a direct Számla Agent query outside the journal.
     pub(super) async fn query_request(
@@ -211,20 +210,11 @@ impl Execution {
         request: QueryRequest,
     ) -> Result<QueryResponse, HandlerError> {
         let selector = request.selector;
-        if request.include_verification {
-            let outcome = run_reading(ctx, "query", self, move |gateway| async move {
-                gateway.query_with_verification(&selector).await
-            })
-            .await?;
-            return query_response(outcome, &self.config.namespace).map_err(HandlerError::from);
-        }
         let outcome = run_reading(ctx, "query", self, move |gateway| async move {
             gateway.query(&selector).await
         })
         .await?;
-        query_response(outcome, &self.config.namespace)
-            .map(|found| QueryResponse::from(&found))
-            .map_err(HandlerError::from)
+        query_response(outcome, &self.config.namespace).map_err(HandlerError::from)
     }
 
     /// The `query_taxpayer` handler: one durable step (`lookup-taxpayer-{prefix}`)

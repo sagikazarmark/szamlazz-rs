@@ -109,7 +109,7 @@ async fn a_credential_code_on_any_operation_is_credentials_rejected() {
         h.gateway
             .query(&Selector::ExternalId("acct:ORD-1:invoice".to_owned()))
             .await,
-        expected,
+        Ok(QueryOutcome::CredentialsRejected(rejected("164"))),
         "query"
     );
 

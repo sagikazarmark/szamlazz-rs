@@ -1,4 +1,4 @@
-//! Opt-in evidence through the public query and retained Restate journal.
+//! Document facts through the public query and retained Restate journal.
 
 use serde_json::json;
 use wiremock::ResponseTemplate;
@@ -19,8 +19,7 @@ pub(crate) async fn query_preserves_buyer_and_vat_evidence(h: &Harness) {
         .call_agent(
             "query",
             &json!({
-                "selector": {"invoice_number": "SZ-VERIFY-227"},
-                "include_verification": true
+                "selector": {"invoice_number": "SZ-VERIFY-227"}
             }),
         )
         .await;
@@ -28,16 +27,20 @@ pub(crate) async fn query_preserves_buyer_and_vat_evidence(h: &Harness) {
     assert_eq!(reply.body["invoice_number"], "SZ-VERIFY-227");
     assert_eq!(reply.body["document_id"], 924_307_338);
     assert_eq!(
-        reply.body["verification"],
+        reply.body["buyer"],
         json!({
-            "buyer_name": "Observed Buyer",
-            "buyer_tax_number": "12345678-2-42",
-            "buyer_eu_tax_number": "HU12345678",
-            "by_vat_rate": [
-                {"vat_type": null, "vat_rate_code": "27.0", "net": "100.123456789012345678", "vat": "27.03", "gross": "127.153456789012345678"},
-                {"vat_type": "AAM", "vat_rate_code": "0.0", "net": "10.01", "vat": "0", "gross": "10.01"}
-            ]
+            "name": "Observed Buyer",
+            "tax_number": "12345678-2-42",
+            "eu_tax_number": "HU12345678"
         })
+    );
+    assert!(reply.body.get("verification").is_none());
+    assert_eq!(
+        reply.body["by_vat_rate"],
+        json!([
+            {"vat_type": null, "vat_rate_code": "27.0", "net": "100.123456789012345678", "vat": "27.03", "gross": "127.153456789012345678"},
+            {"vat_type": "AAM", "vat_rate_code": "0.0", "net": "10.01", "vat": "0", "gross": "10.01"}
+        ])
     );
 }
 
@@ -70,26 +73,17 @@ pub(crate) async fn omitted_evidence_and_equal_totals_do_not_fabricate_matches(h
             .mount(&h.mock)
             .await;
         let reply = h
-            .call_agent(
-                "query",
-                &json!({"selector": {"invoice_number": number}, "include_verification": true}),
-            )
+            .call_agent("query", &json!({"selector": {"invoice_number": number}}))
             .await;
         assert_eq!(reply.status, 200, "{}", reply.body);
-        assert_eq!(reply.body["verification"]["buyer_tax_number"], json!(null));
-        assert_eq!(
-            reply.body["verification"]["buyer_eu_tax_number"],
-            json!(null)
-        );
+        assert_eq!(reply.body["buyer"]["tax_number"], json!(null));
+        assert_eq!(reply.body["buyer"]["eu_tax_number"], json!(null));
         replies.push(reply.body.clone());
     }
-    assert_eq!(replies[0]["verification"]["by_vat_rate"], json!([]));
-    assert_eq!(replies[1]["verification"]["by_vat_rate"][0]["gross"], "0");
+    assert_eq!(replies[0]["by_vat_rate"], json!([]));
+    assert_eq!(replies[1]["by_vat_rate"][0]["gross"], "0");
     assert_eq!(replies[2]["gross_total"], replies[3]["gross_total"]);
-    assert_ne!(
-        replies[2]["verification"]["by_vat_rate"],
-        replies[3]["verification"]["by_vat_rate"]
-    );
+    assert_ne!(replies[2]["by_vat_rate"], replies[3]["by_vat_rate"]);
 }
 
 fn subtotal(rate: &str, net: &str, vat: &str, gross: &str) -> String {
@@ -98,7 +92,7 @@ fn subtotal(rate: &str, net: &str, vat: &str, gross: &str) -> String {
     )
 }
 
-pub(crate) async fn verification_uses_the_query_identity_and_fault_rules(h: &Harness) {
+pub(crate) async fn query_preserves_identity_and_fault_rules(h: &Harness) {
     use crate::harness::szamlazz::{api_error, not_found};
     for (number, response, status, code) in [
         (
@@ -131,116 +125,127 @@ pub(crate) async fn verification_uses_the_query_identity_and_fault_rules(h: &Har
             .mount(&h.mock)
             .await;
         let reply = h
-            .call_agent(
-                "query",
-                &json!({"selector": {"invoice_number": number}, "include_verification": true}),
-            )
+            .call_agent("query", &json!({"selector": {"invoice_number": number}}))
             .await;
         assert_eq!(reply.status, status, "{}", reply.body);
         assert_eq!(reply.fault().code.as_str(), code);
         assert!(!reply.body.to_string().contains("SZ-OTHER"));
     }
-    for value in [json!(null), json!("true"), json!(1)] {
+    for value in [json!(true), json!(false), json!(null)] {
         let reply = h.call_agent("query", &json!({"selector": {"invoice_number": "SZ-VERIFY-NO-SEND"}, "include_verification": value})).await;
         assert_eq!(reply.status, 400, "{}", reply.body);
         assert!(h.admin().runs(reply.invocation_id()).await.is_empty());
     }
 }
 
-pub(crate) async fn only_opted_in_evidence_is_retained_and_replayed(h: &Harness) {
+#[allow(
+    clippy::too_many_lines,
+    reason = "one retention scenario comparing explicit queries, replay and Order observations"
+)]
+pub(crate) async fn query_retains_and_replays_only_document_facts(h: &Harness) {
     use restate_e2e_harness::{Call, run_result};
     use restate_szamlazz::contract::QueryResponse;
-    use restate_szamlazz::gateway::{FoundDocument, QueryOutcome};
+    use restate_szamlazz::gateway::QueryOutcome;
 
-    let xml = Doc::new("SZ-VERIFY-PRIVATE", "SZ").xml()
+    let xml = Doc::of("SZ-VERIFY-PRIVATE", "SZ", "E2E-QUERY-227").xml()
         .replace("<nev>Buyer</nev>", "<nev>BUYER-227-RETAINED</nev><adoszam>227-TAX</adoszam><adoszameu>227-EU</adoszameu><email>PRIVATE-227-EMAIL</email><azonosito>PRIVATE-227-PARTNER</azonosito><cim><irsz>1234</irsz><telepules>PRIVATE-227-CITY</telepules><cim>PRIVATE-227-STREET</cim></cim>")
         .replace("<nev>Seller</nev>", "<nev>PRIVATE-227-SELLER</nev>")
         .replace("</szamla>", "<pdf>UFJJVkFURS0yMjctUERG</pdf><cimkek><cimke>PRIVATE-227-LABEL</cimke></cimkek></szamla>")
         .replace("<totalossz>", &format!("{}<totalossz>", subtotal("27", "1000", "270", "1270")));
     number_query("SZ-VERIFY-PRIVATE")
-        .respond_with(ResponseTemplate::new(200).set_body_string(xml))
-        .expect(3)
+        .respond_with(ResponseTemplate::new(200).set_body_string(xml.clone()))
+        .expect(1)
         .mount(&h.mock)
         .await;
-    for (key, include) in [
-        ("227-default", None),
-        ("227-false", Some(false)),
-        ("227-true", Some(true)),
-    ] {
-        let mut body = json!({"selector": {"invoice_number": "SZ-VERIFY-PRIVATE"}});
-        if let Some(include) = include {
-            body["include_verification"] = json!(include);
+    let key = "227-query";
+    let body = json!({"selector": {"invoice_number": "SZ-VERIFY-PRIVATE"}});
+    let call = Call::service("Szamlazz.Agent", "query");
+    let reply = h.invoke(&call, Some(&body), Some(key)).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert!(reply.body.get("verification").is_none());
+    let journal = h.admin().journal(reply.invocation_id()).await;
+    let result = run_result(&journal, "query").expect("retained query result");
+    for sentinel in ["BUYER-227-RETAINED", "227-TAX", "227-EU", "by_vat_rate"] {
+        assert!(result.raw_contains(sentinel), "{key}: {sentinel}");
+    }
+    for entry in &journal {
+        for private in [
+            "PRIVATE-227-EMAIL",
+            "PRIVATE-227-PARTNER",
+            "PRIVATE-227-CITY",
+            "PRIVATE-227-STREET",
+            "PRIVATE-227-SELLER",
+            "PRIVATE-227-LABEL",
+            "UFJJVkFURS0yMjctUERG",
+        ] {
+            assert!(!entry.raw_contains(private), "{key}: retained {private}");
         }
-        let call = Call::service("Szamlazz.Agent", "query");
-        let reply = h.invoke(&call, Some(&body), Some(key)).await;
-        assert_eq!(reply.status, 200, "{}", reply.body);
-        let opted_in = include == Some(true);
-        assert_eq!(reply.body.get("verification").is_some(), opted_in);
-        let journal = h.admin().journal(reply.invocation_id()).await;
-        let result = run_result(&journal, "query").expect("retained query result");
-        for sentinel in ["BUYER-227-RETAINED", "227-TAX", "227-EU", "by_vat_rate"] {
-            assert_eq!(result.raw_contains(sentinel), opted_in, "{key}: {sentinel}");
-        }
-        for entry in &journal {
-            for private in [
-                "PRIVATE-227-EMAIL",
-                "PRIVATE-227-PARTNER",
-                "PRIVATE-227-CITY",
-                "PRIVATE-227-STREET",
-                "PRIVATE-227-SELLER",
-                "PRIVATE-227-LABEL",
-                "UFJJVkFURS0yMjctUERG",
-            ] {
-                assert!(!entry.raw_contains(private), "{key}: retained {private}");
-            }
-        }
-        // Read the actual stored JSON, then exercise its typed replay decoder.
-        let start = result
-            .raw
-            .iter()
-            .position(|byte| *byte == b'{')
-            .expect("JSON result");
-        let stored: serde_json::Value = serde_json::Deserializer::from_slice(&result.raw[start..])
-            .into_iter()
-            .next()
-            .expect("JSON value")
-            .expect("stored outcome");
-        let projected = if opted_in {
-            assert_eq!(
-                stored["Found"], reply.body,
-                "journal has only the response allowlist"
+    }
+    // Read the actual stored JSON, then exercise its typed replay decoder.
+    let start = result
+        .raw
+        .iter()
+        .position(|byte| *byte == b'{')
+        .expect("JSON result");
+    let stored: serde_json::Value = serde_json::Deserializer::from_slice(&result.raw[start..])
+        .into_iter()
+        .next()
+        .expect("JSON value")
+        .expect("stored outcome");
+    assert_eq!(
+        stored["Found"], reply.body,
+        "journal has only the response allowlist"
+    );
+    assert_eq!(
+        stored["Found"]["buyer"],
+        json!({
+            "name": "BUYER-227-RETAINED",
+            "tax_number": "227-TAX",
+            "eu_tax_number": "227-EU"
+        })
+    );
+    assert_eq!(
+        stored["Found"]["by_vat_rate"],
+        json!([{"vat_type": null, "vat_rate_code": "27", "net": "1000", "vat": "270", "gross": "1270"}])
+    );
+    let QueryOutcome::Found(response): QueryOutcome<QueryResponse> =
+        serde_json::from_value(stored).expect("replay decode")
+    else {
+        panic!("found");
+    };
+    assert_eq!(
+        serde_json::to_value(response).expect("response"),
+        reply.body
+    );
+    let retained = h.invoke(&call, Some(&body), Some(key)).await;
+    assert_eq!(retained.invocation_id(), reply.invocation_id());
+    assert_eq!(retained.body, reply.body);
+    replay_query_prefix(h, reply.invocation_id(), &reply.body).await;
+
+    // The explicit query projection must not widen Order observation journals.
+    h.absent("E2E-QUERY-227", &["proforma", "prepayment", "final"])
+        .await;
+    crate::harness::szamlazz::external_id_query("acct:E2E-QUERY-227:invoice")
+        .respond_with(ResponseTemplate::new(200).set_body_string(xml))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
+    let observed = h
+        .invoke(
+            &Call::object("Szamlazz.Order", "E2E-QUERY-227", "get"),
+            None,
+            Some("227-get"),
+        )
+        .await;
+    assert_eq!(observed.status, 200, "{}", observed.body);
+    for sentinel in ["BUYER-227-RETAINED", "227-TAX", "227-EU", "by_vat_rate"] {
+        assert!(!observed.body.to_string().contains(sentinel));
+        for entry in h.admin().journal(observed.invocation_id()).await {
+            assert!(
+                !entry.raw_contains(sentinel),
+                "Order get retained {sentinel}"
             );
-            assert_eq!(
-                stored["Found"]["verification"],
-                json!({
-                    "buyer_name": "BUYER-227-RETAINED",
-                    "buyer_tax_number": "227-TAX",
-                    "buyer_eu_tax_number": "227-EU",
-                    "by_vat_rate": [{"vat_type": null, "vat_rate_code": "27", "net": "1000", "vat": "270", "gross": "1270"}]
-                })
-            );
-            let QueryOutcome::Found(response): QueryOutcome<QueryResponse> =
-                serde_json::from_value(stored).expect("replay decode")
-            else {
-                panic!("found");
-            };
-            *response
-        } else {
-            let QueryOutcome::Found(found): QueryOutcome<FoundDocument> =
-                serde_json::from_value(stored).expect("replay decode")
-            else {
-                panic!("found");
-            };
-            QueryResponse::from(&*found)
-        };
-        assert_eq!(
-            serde_json::to_value(projected).expect("response"),
-            reply.body
-        );
-        let retained = h.invoke(&call, Some(&body), Some(key)).await;
-        assert_eq!(retained.invocation_id(), reply.invocation_id());
-        assert_eq!(retained.body, reply.body);
-        replay_query_prefix(h, reply.invocation_id(), &reply.body).await;
+        }
     }
 }
 
