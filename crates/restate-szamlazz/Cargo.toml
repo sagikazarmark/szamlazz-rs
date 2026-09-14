@@ -14,7 +14,8 @@ default = []
 ## JSON Schema derivation for the contract types (OpenAPI via Restate discovery).
 schemars = ["dep:schemars", "restate-sdk/schemars"]
 ## Constructors that skip validation (`ValidatedWorkerConfig::unchecked`), for test
-## harnesses whose policies are sized for a mock. Never enable it in a deployment.
+## harnesses whose policies are sized for a mock, and the isolated #247
+## RequestResponse experiment. Never enable it in a production deployment.
 test-util = []
 
 [dependencies]
@@ -36,6 +37,8 @@ unicode-normalization = "0.1.25"
 url = "2.5.8"
 
 [dev-dependencies]
+axum = { workspace = true, features = ["http1", "tokio"] }
+http-body-util = { workspace = true }
 regex = "1"
 futures-util = "0.3.32"
 # Linux reads system tzdata; the platform bundle covers Windows/macOS.

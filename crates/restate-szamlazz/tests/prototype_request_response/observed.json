@@ -1,0 +1,475 @@
+{
+  "agent_check_account": {
+    "account": {
+      "id": "prototype"
+    },
+    "credentials": {
+      "state": "ok"
+    },
+    "namespace": "proto",
+    "scope": null
+  },
+  "limitations": "Fake provider, native buffered host, two in-process endpoint instances. Not a workerd test or a measured provider risk rate.",
+  "observations": [
+    {
+      "case": "strict",
+      "invocation": "Invocation { status: \"paused\", completion_failure: None, scope: None, service: \"Szamlazz.Order\", handler: \"create_invoice\" }",
+      "marker": {
+        "marker": {
+          "account_id": "prototype",
+          "created_at": "2026-09-14T15:24:31.963345022Z",
+          "credential_ref": "prototype",
+          "endpoint": "http://127.0.0.1:41259",
+          "external_id": "proto:strict:invoice",
+          "namespace": "proto",
+          "operation": {
+            "corrected_number": null,
+            "expected_number": null,
+            "kind": "invoice",
+            "type": "create"
+          },
+          "order": "strict",
+          "owner_invocation": "inv_1f95OjZDwdeu3eE2akCchKX3rUDD6kZVNK",
+          "scope": null,
+          "token": "inv_1f95OjZDwdeu3eE2akCchKX3rUDD6kZVNK",
+          "version": 1
+        },
+        "state": "unresolved"
+      },
+      "runs": [
+        "namespace",
+        "account",
+        "lookup-invoice",
+        "lookup-prepayment",
+        "lookup-final",
+        "lookup-proforma",
+        "lookup-invoice",
+        "prepare-write",
+        "arm-write",
+        "create-invoice",
+        "reconcile-write"
+      ],
+      "state": {
+        "documents": [],
+        "events": [],
+        "sends": 0,
+        "visible": false
+      },
+      "write_result_recorded": false
+    },
+    {
+      "case": "normal",
+      "invocation": "Invocation { status: \"completed\", completion_failure: None, scope: None, service: \"NarrowPrototype\", handler: \"issue\" }",
+      "marker": {
+        "marker": null
+      },
+      "response": {
+        "number": "normal-1",
+        "outcome": "issued"
+      },
+      "runs": [
+        "marker-committed",
+        "write"
+      ],
+      "state": {
+        "documents": [
+          "normal-1"
+        ],
+        "events": [
+          "execution on worker 0",
+          "execution on worker 1",
+          "write closure on worker 1",
+          "provider received send 1",
+          "execution on worker 0"
+        ],
+        "sends": 1,
+        "visible": true
+      },
+      "write_result_recorded": true
+    },
+    {
+      "case": "visible-crash",
+      "invocation": "Invocation { status: \"completed\", completion_failure: None, scope: None, service: \"NarrowPrototype\", handler: \"issue\" }",
+      "marker": {
+        "marker": null
+      },
+      "response": {
+        "number": "visible-crash-1",
+        "outcome": "found"
+      },
+      "runs": [
+        "marker-committed",
+        "write"
+      ],
+      "state": {
+        "documents": [
+          "visible-crash-1"
+        ],
+        "events": [
+          "execution on worker 0",
+          "execution on worker 1",
+          "write closure on worker 1",
+          "provider received send 1",
+          "execution on worker 0",
+          "write closure on worker 0",
+          "execution on worker 1"
+        ],
+        "sends": 1,
+        "visible": true
+      },
+      "write_result_recorded": true
+    },
+    {
+      "case": "invisible-crash",
+      "invocation": "Invocation { status: \"completed\", completion_failure: None, scope: None, service: \"NarrowPrototype\", handler: \"issue\" }",
+      "marker": {
+        "marker": null
+      },
+      "response": {
+        "number": "invisible-crash-2",
+        "outcome": "issued"
+      },
+      "runs": [
+        "marker-committed",
+        "write"
+      ],
+      "state": {
+        "documents": [
+          "invisible-crash-1",
+          "invisible-crash-2"
+        ],
+        "events": [
+          "execution on worker 1",
+          "execution on worker 0",
+          "write closure on worker 0",
+          "provider received send 1",
+          "execution on worker 1",
+          "write closure on worker 1",
+          "provider received send 2",
+          "execution on worker 0"
+        ],
+        "sends": 2,
+        "visible": false
+      },
+      "write_result_recorded": true
+    },
+    {
+      "case": "corrective-crash",
+      "invocation": "Invocation { status: \"completed\", completion_failure: None, scope: None, service: \"NarrowPrototype\", handler: \"issue\" }",
+      "marker": {
+        "marker": null
+      },
+      "response": {
+        "number": "corrective-crash-2",
+        "outcome": "issued"
+      },
+      "runs": [
+        "marker-committed",
+        "write"
+      ],
+      "state": {
+        "documents": [
+          "corrective-crash-1",
+          "corrective-crash-2"
+        ],
+        "events": [
+          "execution on worker 0",
+          "execution on worker 1",
+          "write closure on worker 1",
+          "provider received send 1",
+          "execution on worker 0",
+          "write closure on worker 0",
+          "provider received send 2",
+          "execution on worker 1"
+        ],
+        "sends": 2,
+        "visible": false
+      },
+      "write_result_recorded": true
+    },
+    {
+      "case": "dedup-crash",
+      "invocation": "Invocation { status: \"completed\", completion_failure: None, scope: None, service: \"NarrowPrototype\", handler: \"issue\" }",
+      "marker": {
+        "marker": null
+      },
+      "response": {
+        "number": "dedup-crash-1",
+        "outcome": "issued"
+      },
+      "runs": [
+        "marker-committed",
+        "write"
+      ],
+      "state": {
+        "documents": [
+          "dedup-crash-1"
+        ],
+        "events": [
+          "execution on worker 1",
+          "execution on worker 0",
+          "write closure on worker 0",
+          "provider received send 1",
+          "execution on worker 1",
+          "write closure on worker 1",
+          "provider received send 2",
+          "execution on worker 0"
+        ],
+        "sends": 2,
+        "visible": false
+      },
+      "write_result_recorded": true
+    },
+    {
+      "case": "recorded-unknown",
+      "invocation": "Invocation { status: \"paused\", completion_failure: None, scope: None, service: \"NarrowPrototype\", handler: \"issue\" }",
+      "marker": {
+        "marker": "inv_1hBTqdLsRiJR7lDAZEaAo5qnXEkfSEnVw2"
+      },
+      "runs": [
+        "marker-committed",
+        "write",
+        "reconcile"
+      ],
+      "state": {
+        "documents": [
+          "recorded-unknown-1"
+        ],
+        "events": [
+          "execution on worker 0",
+          "execution on worker 1",
+          "write closure on worker 1",
+          "provider received send 1",
+          "execution on worker 0",
+          "read-only reconciliation on worker 0",
+          "execution on worker 1",
+          "read-only reconciliation on worker 1"
+        ],
+        "sends": 1,
+        "visible": false
+      },
+      "write_result_recorded": true
+    },
+    {
+      "case": "recorded-unknown",
+      "invocation": "Invocation { status: \"completed\", completion_failure: None, scope: None, service: \"NarrowPrototype\", handler: \"issue\" }",
+      "marker": {
+        "marker": null
+      },
+      "response": {
+        "number": "recorded-unknown-1",
+        "outcome": "reconciled"
+      },
+      "runs": [
+        "marker-committed",
+        "write",
+        "reconcile"
+      ],
+      "state": {
+        "documents": [
+          "recorded-unknown-1"
+        ],
+        "events": [
+          "execution on worker 0",
+          "execution on worker 1",
+          "write closure on worker 1",
+          "provider received send 1",
+          "execution on worker 0",
+          "read-only reconciliation on worker 0",
+          "execution on worker 1",
+          "read-only reconciliation on worker 1",
+          "execution on worker 1",
+          "read-only reconciliation on worker 1",
+          "execution on worker 0",
+          "read-only reconciliation on worker 0",
+          "execution on worker 1",
+          "read-only reconciliation on worker 1",
+          "execution on worker 0"
+        ],
+        "sends": 1,
+        "visible": true
+      },
+      "write_result_recorded": true
+    },
+    {
+      "case": "no-effect",
+      "invocation": "Invocation { status: \"paused\", completion_failure: None, scope: None, service: \"NarrowPrototype\", handler: \"issue\" }",
+      "marker": {
+        "marker": "inv_11qYN4xYbkU60zoqHVIyrQcLYMabxwDJdC"
+      },
+      "runs": [
+        "marker-committed",
+        "write",
+        "reconcile"
+      ],
+      "state": {
+        "documents": [],
+        "events": [
+          "execution on worker 0",
+          "execution on worker 1",
+          "write closure on worker 1",
+          "provider received send 1",
+          "execution on worker 0",
+          "read-only reconciliation on worker 0",
+          "execution on worker 1",
+          "read-only reconciliation on worker 1"
+        ],
+        "sends": 1,
+        "visible": false
+      },
+      "write_result_recorded": true
+    },
+    {
+      "case": "no-effect",
+      "invocation": "Invocation { status: \"completed\", completion_failure: Some(\"[409] killed\"), scope: None, service: \"NarrowPrototype\", handler: \"issue\" }",
+      "marker": {
+        "marker": "inv_11qYN4xYbkU60zoqHVIyrQcLYMabxwDJdC"
+      },
+      "runs": [
+        "marker-committed",
+        "write",
+        "reconcile"
+      ],
+      "state": {
+        "documents": [],
+        "events": [
+          "execution on worker 0",
+          "execution on worker 1",
+          "write closure on worker 1",
+          "provider received send 1",
+          "execution on worker 0",
+          "read-only reconciliation on worker 0",
+          "execution on worker 1",
+          "read-only reconciliation on worker 1",
+          "execution on worker 1",
+          "read-only reconciliation on worker 1",
+          "execution on worker 0",
+          "read-only reconciliation on worker 0",
+          "execution on worker 1"
+        ],
+        "sends": 1,
+        "visible": false
+      },
+      "successor": {
+        "outcome": "blocked"
+      },
+      "write_result_recorded": true
+    },
+    {
+      "case": "later-rejection",
+      "invocation": "Invocation { status: \"paused\", completion_failure: None, scope: None, service: \"NarrowPrototype\", handler: \"issue\" }",
+      "marker": {
+        "marker": "inv_1jowRLgq7qmY0cVx3BTggKfwfJDVso4HKZ"
+      },
+      "runs": [
+        "marker-committed",
+        "write",
+        "reconcile"
+      ],
+      "state": {
+        "documents": [
+          "later-rejection-1"
+        ],
+        "events": [
+          "execution on worker 1",
+          "execution on worker 0",
+          "write closure on worker 0",
+          "provider received send 1",
+          "execution on worker 1",
+          "write closure on worker 1",
+          "provider received send 2",
+          "execution on worker 0",
+          "read-only reconciliation on worker 0",
+          "execution on worker 1",
+          "read-only reconciliation on worker 1"
+        ],
+        "sends": 2,
+        "visible": false
+      },
+      "write_result_recorded": true
+    },
+    {
+      "case": "later-rejection",
+      "invocation": "Invocation { status: \"completed\", completion_failure: None, scope: None, service: \"NarrowPrototype\", handler: \"issue\" }",
+      "marker": {
+        "marker": null
+      },
+      "response": {
+        "number": "later-rejection-1",
+        "outcome": "reconciled"
+      },
+      "runs": [
+        "marker-committed",
+        "write",
+        "reconcile"
+      ],
+      "state": {
+        "documents": [
+          "later-rejection-1"
+        ],
+        "events": [
+          "execution on worker 1",
+          "execution on worker 0",
+          "write closure on worker 0",
+          "provider received send 1",
+          "execution on worker 1",
+          "write closure on worker 1",
+          "provider received send 2",
+          "execution on worker 0",
+          "read-only reconciliation on worker 0",
+          "execution on worker 1",
+          "read-only reconciliation on worker 1",
+          "execution on worker 1",
+          "read-only reconciliation on worker 1",
+          "execution on worker 0",
+          "read-only reconciliation on worker 0",
+          "execution on worker 1",
+          "read-only reconciliation on worker 1",
+          "execution on worker 0"
+        ],
+        "sends": 2,
+        "visible": true
+      },
+      "write_result_recorded": true
+    },
+    {
+      "case": "old-worker",
+      "invocation": "Invocation { status: \"completed\", completion_failure: None, scope: None, service: \"NarrowPrototype\", handler: \"issue\" }",
+      "marker": {
+        "marker": null
+      },
+      "response": {
+        "number": "old-worker-1",
+        "outcome": "issued"
+      },
+      "runs": [
+        "marker-committed",
+        "write"
+      ],
+      "state": {
+        "documents": [
+          "old-worker-1",
+          "old-worker-2"
+        ],
+        "events": [
+          "execution on worker 0",
+          "execution on worker 1",
+          "write closure on worker 1",
+          "execution on worker 0",
+          "write closure on worker 0",
+          "provider received send 1",
+          "execution on worker 1",
+          "provider received send 2"
+        ],
+        "sends": 2,
+        "visible": false
+      },
+      "write_result_recorded": true
+    }
+  ],
+  "protocol": "RequestResponse v7",
+  "prototype": "#247 RequestResponse narrow replay",
+  "sdk": "0.12.0",
+  "server": "1.7.8",
+  "shared_core": "7.0.3"
+}

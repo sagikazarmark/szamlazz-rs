@@ -1273,10 +1273,22 @@ impl Gateway {
             external_id = %request.external_id,
             kind = %request.kind,
         );
-        self.lookup_inner(&request).instrument(span).await
+        self.lookup_inner(&request, false).instrument(span).await
     }
 
-    async fn lookup_inner(&self, request: &LookupRequest<'_>) -> Result<LookupOutcome, Unanswered> {
+    #[cfg(feature = "test-util")]
+    pub(crate) async fn lookup_initial_ordinary(
+        &self,
+        request: LookupRequest<'_>,
+    ) -> Result<LookupOutcome, Unanswered> {
+        self.lookup_inner(&request, true).await
+    }
+
+    async fn lookup_inner(
+        &self,
+        request: &LookupRequest<'_>,
+        block_proforma: bool,
+    ) -> Result<LookupOutcome, Unanswered> {
         // Step 1: the external id.
         let reversed = match self
             .seen(request.external_id, request.order, request.kind)
@@ -1306,7 +1318,11 @@ impl Gateway {
             match self.hint_raw(request.order).await {
                 Ok(hint) => {
                     let seen = reversed.as_deref().map(|found| found.number.as_str());
-                    if is_foreign(&hint, request.our_numbers, seen) {
+                    if is_foreign(&hint, request.our_numbers, seen)
+                        || (block_proforma
+                            && hint.is_live()
+                            && hint.document_type == szamlazz_agent::DocumentType::Proforma)
+                    {
                         tracing::warn!(
                             number = %hint.number,
                             tipus = %hint.document_type,
@@ -1457,6 +1473,16 @@ impl Gateway {
         request: &CreateStepRequest<'_>,
         protected: bool,
     ) -> Result<CreateOutcome, Unconfirmed> {
+        self.create_send_with_duplicate_evidence(request, protected, false)
+            .await
+    }
+
+    async fn create_send_with_duplicate_evidence(
+        &self,
+        request: &CreateStepRequest<'_>,
+        protected: bool,
+        retain_positive_duplicate: bool,
+    ) -> Result<CreateOutcome, Unconfirmed> {
         // Step 2: create.
         match self.client.send(request.create).await {
             Ok(CreationOutcome::Issued(created)) => {
@@ -1526,6 +1552,11 @@ impl Gateway {
                     tracing::info!(code = %answer.code, "duplicate order number; re-querying");
                     let diagnostic = self.after_duplicate(request, answer.clone()).await;
                     Ok(match diagnostic {
+                        outcome @ (CreateOutcome::Reconciled(_) | CreateOutcome::Reversed(_))
+                            if retain_positive_duplicate =>
+                        {
+                            outcome
+                        }
                         outcome @ CreateOutcome::DuplicateOrderNumber { .. } => outcome,
                         outcome if !protected => outcome,
                         _ => duplicate_refusal(request.kind, answer),

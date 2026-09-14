@@ -584,6 +584,15 @@ impl Execution {
         kind: DocumentKind,
         request: CreateRequest,
     ) -> Result<CreateResponse, HandlerError> {
+        // The experiment never converts a proforma, even under provider defaults.
+        #[cfg(feature = "test-util")]
+        let request = if self.experimental_request_response {
+            let mut request = request;
+            request.options.proforma = ProformaLink::None;
+            request
+        } else {
+            request
+        };
         // Step 0: validate (pure).
         let prepared = self.prepare(order, kind, request)?;
         let identity = Identity::of_kind(&self.config.namespace, &prepared.order, kind);
@@ -918,6 +927,13 @@ impl Execution {
 
         // Step 3: lookup, then decide on what it found.
         let found = self.lookup_step(ctx, order, &intent).await.map_err(about)?;
+        #[cfg(feature = "test-util")]
+        if self.experimental_request_response
+            && let LookupOutcome::Foreign(document) = &found
+            && document.document_type == DocumentType::Proforma
+        {
+            return Ok(identity.conflict_about(ConflictReason::ProformaLive, &document.number));
+        }
         let reversed = match decide_lookup(
             found,
             intent.reissue.as_ref(),
@@ -954,19 +970,24 @@ impl Execution {
         let order = order.clone();
         let our_numbers = intent.our_numbers.clone();
         let corrected_number = intent.corrected_number.clone();
+        #[cfg(feature = "test-util")]
+        let experimental = self.experimental_request_response;
         run_reading(
             ctx,
             format!("lookup-{kind}"),
             self,
             move |gateway| async move {
-                let outcome = gateway
-                    .lookup(LookupRequest {
-                        external_id: &external_id,
-                        kind,
-                        order: &order,
-                        our_numbers: &our_numbers,
-                    })
-                    .await?;
+                let request = LookupRequest {
+                    external_id: &external_id,
+                    kind,
+                    order: &order,
+                    our_numbers: &our_numbers,
+                };
+                #[cfg(feature = "test-util")]
+                if experimental {
+                    return gateway.lookup_initial_ordinary(request).await;
+                }
+                let outcome = gateway.lookup(request).await?;
                 // References have been resolved. A newly visible corrective must
                 // satisfy the same intent as the armed query and reconciliation.
                 Ok(match outcome {
@@ -1011,6 +1032,16 @@ impl Execution {
             intent.corrected_number.as_deref(),
         )
         .map_err(|error| Fault::invalid_input(error.to_string()))?;
+        #[cfg(feature = "test-util")]
+        if self.experimental_request_response {
+            let result = self
+                .ordinary_request_response(ctx, order, request, &intent.identity.external_id)
+                .await?;
+            return match result {
+                crate::gateway::recovery::WriteResult::Create(outcome) => Ok(outcome),
+                _ => Err(Fault::outcome_unknown("ordinary issuance remains unresolved").into()),
+            };
+        }
         let result = self
             .protected_write(
                 ctx,

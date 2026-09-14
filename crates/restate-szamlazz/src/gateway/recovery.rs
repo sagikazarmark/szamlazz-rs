@@ -190,6 +190,95 @@ impl WriteResult {
 }
 
 impl Gateway {
+    /// #247 only: open-run replay may submit again after fresh absence and
+    /// guards. Kept distinct from the public consumed-permission contract.
+    #[cfg(feature = "test-util")]
+    pub(crate) async fn ordinary_request_response<F, Fut>(
+        &self,
+        request: super::CreateStepRequest<'_>,
+        before_send: F,
+    ) -> WriteResult
+    where
+        F: FnOnce() -> Fut + Send,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        use crate::identity::{DocumentKind, IssuedKind};
+        // Defence in depth: this seam is never a blanket permission for kinds.
+        if request.kind != IssuedKind::Invoice
+            || request.reversed.is_some()
+            || request.corrected_number.is_some()
+        {
+            return WriteResult::unresolved("unsupported experimental ordinary intent");
+        }
+        match self.settled_by_query(&request, true).await {
+            Ok(Some(outcome)) => {
+                return ordinary_result(Ok(outcome), request.external_id.namespace());
+            }
+            Ok(None) => {}
+            Err(QueryError::CredentialsRejected(answer)) => {
+                answer.warn_credentials_rejected(request.external_id.namespace());
+                return WriteResult::unresolved(format!(
+                    "ordinary holder credentials rejected: {}",
+                    answer.code
+                ));
+            }
+            Err(_) => return WriteResult::unresolved("ordinary holder query failed"),
+        }
+        let Ok(namespace) = request.external_id.namespace().parse() else {
+            return WriteResult::unresolved("invalid ordinary namespace");
+        };
+        for kind in [
+            DocumentKind::Prepayment,
+            DocumentKind::Final,
+            DocumentKind::Proforma,
+        ] {
+            let id = ExternalId::for_kind(&namespace, request.order, kind);
+            match self.lookup_ours(&id, request.order, kind.into()).await {
+                Ok(super::OwnershipOutcome::Absent | super::OwnershipOutcome::Reversed(_)) => {}
+                Ok(super::OwnershipOutcome::CredentialsRejected(answer)) => {
+                    answer.warn_credentials_rejected(request.external_id.namespace());
+                    return WriteResult::unresolved(format!(
+                        "fresh {kind} credentials rejected: {}",
+                        answer.code
+                    ));
+                }
+                _ => {
+                    return WriteResult::unresolved(format!(
+                        "fresh {kind} guard did not permit ordinary issuance"
+                    ));
+                }
+            }
+        }
+        // Unlike the ordinary best-effort lookup hint, a failed fresh hint must
+        // not authorize an unfinished-run resend. Proformas can be implicitly
+        // consumed even when they are not under our namespace's external id.
+        match self.hint_raw(request.order).await {
+            Err(QueryError::NotFound) => {}
+            Err(QueryError::CredentialsRejected(answer)) => {
+                answer.warn_credentials_rejected(request.external_id.namespace());
+                return WriteResult::unresolved(format!(
+                    "fresh order hint credentials rejected: {}",
+                    answer.code
+                ));
+            }
+            Ok(found)
+                if !found.is_live()
+                    || (!found.is_invoice_family()
+                        && found.document_type != szamlazz_agent::DocumentType::Proforma) => {}
+            _ => {
+                return WriteResult::unresolved(
+                    "fresh order hint did not permit ordinary issuance",
+                );
+            }
+        }
+        before_send().await;
+        ordinary_result(
+            self.create_send_with_duplicate_evidence(&request, true, true)
+                .await,
+            request.external_id.namespace(),
+        )
+    }
+
     /// The protected Order lookup: only absence permits a send. A holder that
     /// cannot establish this order's reversal is an unanswered evidence read.
     /// The fresh original check stays inside the same durable lookup operation.
@@ -577,6 +666,35 @@ impl Gateway {
                 "deletion requires independent settlement; document queries cannot establish completion",
             ),
         })
+    }
+}
+
+/// Positive issuance alone clears under accepted ordinary replay risk. A later
+/// refusal/collision says nothing about an interrupted earlier execution.
+#[cfg(feature = "test-util")]
+fn ordinary_result(
+    result: Result<CreateOutcome, super::Unconfirmed>,
+    namespace: &str,
+) -> WriteResult {
+    match result {
+        Ok(
+            outcome @ (CreateOutcome::Issued(_)
+            | CreateOutcome::Found(_)
+            | CreateOutcome::Reconciled(_)
+            | CreateOutcome::Reversed(_)),
+        ) => WriteResult::Create(outcome),
+        Ok(CreateOutcome::CredentialsRejected(answer)) => {
+            answer.warn_credentials_rejected(namespace);
+            WriteResult::unresolved(format!("ordinary credentials rejected: {}", answer.code))
+        }
+        Ok(CreateOutcome::Rejected(rejection)) => {
+            WriteResult::unresolved(format!("ordinary refusal: {}", rejection.code))
+        }
+        Ok(CreateOutcome::DuplicateOrderNumber { answer, .. }) => {
+            WriteResult::unresolved(format!("ordinary duplicate refusal: {}", answer.code))
+        }
+        Ok(_) => WriteResult::unresolved("ordinary guard or query did not establish issuance"),
+        Err(cause) => WriteResult::Unresolved(WriteDiagnostic::unconfirmed(cause)),
     }
 }
 

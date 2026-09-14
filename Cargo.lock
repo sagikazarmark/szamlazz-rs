@@ -2205,9 +2205,11 @@ dependencies = [
 name = "restate-szamlazz"
 version = "0.8.0"
 dependencies = [
+ "axum",
  "bytes",
  "futures-util",
  "http",
+ "http-body-util",
  "jiff",
  "regex",
  "restate-e2e-harness",

@@ -25,6 +25,15 @@ are computed or validated against caller assertions, domain outcomes are returne
 
 ### Protection by operation
 
+An isolated **#247 RequestResponse experiment** is available behind `test-util`,
+explicitly selected on both services with `.experimental_request_response()`.
+It supports initial ordinary invoices and reads only, requires operator-confirmed
+provider duplicate-order checking, and accepts unfinished-run resubmission risk.
+Recorded uncertainty stays read-only; other mutations are refused. See the
+[actual-service experiment](tests/request_response/README.md) and
+[outcome/clearance table](../../docs/design/request-response-outcomes.md).
+This is not production Workers support; the table below describes the default services.
+
 | Operation | Protection and recovery |
 |---|---|
 | Order mutations | Serialized per scope/order. One acknowledged send permit; interrupted or unanswered writes retain a marker that blocks later mutations. Resume reconciles read-only; authorized recovery requires exact-marker evidence. |

@@ -1,5 +1,12 @@
 # Protected Order write protocol (#216)
 
+**Prospective change (#247):** [ADR 0019](../adr/0019-request-response-ordinary-invoice-replay.md)
+selects a RequestResponse-compatible ordinary-issuance direction with explicit
+open-run replay risk. An isolated `test-util` actual-service slice now follows
+the [experimental outcome table](request-response-outcomes.md); this document
+describes the current production protected protocol. The experiment does not authorize relaxing other
+mutations or replaying an old armed invocation under new send semantics.
+
 Implemented command protocol, following [the approved recovery decision](unresolved-order-writes.md).
 The test seams are confirmed: public Gateway, contract serialization, and real Restate ingress/admin.
 

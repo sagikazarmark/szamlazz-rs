@@ -25,6 +25,42 @@ use crate::identity::{ExternalId, OrderKey};
 
 const STATE: &str = "unresolved-write";
 
+/// A distinct serialized run result as well as state discriminator. Run names
+/// alone are not an exceptional-replay fence: an old prepare-write result must
+/// fail decoding rather than become ordinary resend permission.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+    not(feature = "test-util"),
+    allow(
+        dead_code,
+        reason = "registered privacy-scanned experimental journal type"
+    )
+)]
+pub(super) struct OrdinaryIntent {
+    execution_contract: OrdinaryContract,
+    #[serde(flatten)]
+    marker: UnresolvedWrite,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+enum OrdinaryContract {
+    #[serde(rename = "request_response_ordinary_v1")]
+    RequestResponseOrdinaryV1,
+}
+
+impl OrdinaryIntent {
+    #[cfg_attr(
+        not(feature = "test-util"),
+        allow(dead_code, reason = "experimental constructor")
+    )]
+    pub(super) fn new(marker: UnresolvedWrite) -> Self {
+        Self {
+            execution_contract: OrdinaryContract::RequestResponseOrdinaryV1,
+            marker,
+        }
+    }
+}
+
 /// Interruption boundaries exposed only for real-runtime protocol tests.
 #[cfg(feature = "test-util")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +71,8 @@ pub enum WriteCheckpoint {
     AfterMarker,
     /// After acknowledged arming, before consuming permission.
     Armed,
+    /// Experimental ordinary write: fresh target and guards passed, before send.
+    OrdinaryGuardsPassed,
     /// After the write returns, before recording its result.
     Sent,
     /// After a positive reconciliation query, before recording it.
@@ -75,12 +113,24 @@ impl Order {
         let state = ctx.get::<bytes::Bytes>(STATE).await.map_err(read_fault)?;
         Ok(match state {
             None => UnresolvedObservation::Absent,
-            Some(raw) => match decode_marker(&raw, ctx.scope(), ctx.key()) {
-                Some(marker) => UnresolvedObservation::Unresolved {
-                    marker: Box::new(marker),
-                },
-                None => UnresolvedObservation::Unreadable,
-            },
+            Some(raw) => {
+                if let Some(marker) = decode_marker(&raw, ctx.scope(), ctx.key()) {
+                    UnresolvedObservation::Unresolved {
+                        marker: Box::new(marker),
+                    }
+                } else {
+                    #[cfg(feature = "test-util")]
+                    if self.experimental_request_response
+                        && let Ok(marker) = serde_json::from_slice::<serde_json::Value>(&raw)
+                    {
+                        return Ok(UnresolvedObservation::Other {
+                            state: "unresolved".into(),
+                            fields: serde_json::Map::from_iter([("marker".into(), marker)]),
+                        });
+                    }
+                    UnresolvedObservation::Unreadable
+                }
+            }
         })
     }
 
@@ -334,6 +384,103 @@ pub(super) async fn guard(ctx: &ObjectContext<'_>) -> Result<(), HandlerError> {
 }
 
 impl Execution {
+    /// Separate admission/run identity for the isolated ordinary experiment.
+    /// Every non-positive result after the barrier retains earlier uncertainty.
+    #[cfg(feature = "test-util")]
+    pub(super) async fn ordinary_request_response(
+        &self,
+        ctx: &ObjectContext<'_>,
+        order: &OrderKey,
+        request: crate::gateway::CreateStepRequest<'_>,
+        external_id: &ExternalId,
+    ) -> Result<WriteResult, HandlerError> {
+        let marker = UnresolvedWrite {
+            version: MarkerVersion,
+            token: ctx.invocation_id().to_owned(),
+            owner_invocation: ctx.invocation_id().to_owned(),
+            created_at: String::new(),
+            scope: ctx.scope().map(str::to_owned),
+            order: order.clone(),
+            namespace: self.config.namespace.clone(),
+            external_id: external_id.as_str().to_owned(),
+            account_id: self.account.id.to_string(),
+            endpoint: self.account.endpoint.as_str().to_owned(),
+            credential_ref: self.account.credential_ref.to_string(),
+            operation: request.operation(),
+        };
+        let intent = ctx
+            .run(|| async move {
+                let mut marker = marker;
+                marker.created_at = jiff::Timestamp::now().to_string();
+                Ok(journal(OrdinaryIntent::new(marker)))
+            })
+            .name("prepare-ordinary-write")
+            .await
+            .map_err(read_fault)?
+            .0;
+        let marker = &intent.marker;
+        let uncertain = |error: TerminalError| {
+            Fault::outcome_unknown(
+                "experimental ordinary write interrupted at durable await; marker retained",
+            )
+            .with_run_cause(&error)
+            .about(
+                order,
+                Some(crate::identity::IssuedKind::Invoice),
+                external_id,
+            )
+        };
+        self.checkpoint(order, WriteCheckpoint::BeforeMarker).await;
+        ctx.set(STATE, Json(intent.clone()));
+        self.checkpoint(order, WriteCheckpoint::AfterMarker).await;
+        // Awaited acknowledgement of commands preceding the barrier; replay
+        // needs no execution-local arm permit to make progress.
+        ctx.run(|| async { Ok(()) })
+            .name("ordinary-marker-committed")
+            .await
+            .map_err(uncertain)?;
+        let result = ctx
+            .run(|| async {
+                super::prologue::mark_fresh_work();
+                let result = match self.gateway().await {
+                    Ok(gateway) => {
+                        gateway
+                            .ordinary_request_response(request, || {
+                                self.checkpoint(order, WriteCheckpoint::OrdinaryGuardsPassed)
+                            })
+                            .await
+                    }
+                    Err(_) => {
+                        WriteResult::unresolved("pinned account unavailable inside ordinary write")
+                    }
+                };
+                self.checkpoint(order, WriteCheckpoint::Sent).await;
+                Ok(journal(result))
+            })
+            .name("create-ordinary-request-response")
+            .retry_policy(RunRetryPolicy::new().max_attempts(1))
+            .await
+            .map_err(uncertain)?
+            .0;
+        let result = if let WriteResult::Unresolved(original) = result {
+            ctx.run(|| async {
+                super::prologue::mark_fresh_work();
+                let gateway = self.gateway().await.map_err(|_| std::io::Error::other(format!("ordinary write unresolved; original: {}; latest reconciliation: pinned account unavailable", original.reason)))?;
+                let result = gateway.reconcile_write_diagnostic(marker, &original).await;
+                if let WriteResult::Unresolved(latest) = &result {
+                    return Err(std::io::Error::other(format!("ordinary write unresolved; original: {}; latest: {}; reconciliation is read-only", original.reason, latest.reason)).into());
+                }
+                self.checkpoint(order, WriteCheckpoint::Reconciled).await;
+                Ok(journal(result))
+            }).name("reconcile-ordinary-write").await.map_err(uncertain)?.0
+        } else {
+            result
+        };
+        self.checkpoint(order, WriteCheckpoint::Settled).await;
+        ctx.clear(STATE);
+        Ok(result)
+    }
+
     pub(super) async fn protected_write<F, Fut>(
         &self,
         ctx: &ObjectContext<'_>,

@@ -175,6 +175,10 @@ fn entries() -> Vec<Entry> {
         },
     };
     all.extend(entries_of(vec![()], &single()));
+    all.extend(entries_of(
+        vec![super::recovery::OrdinaryIntent::new(marker.clone())],
+        &single(),
+    ));
     all.extend(entries_of(vec![marker], &single()));
     all.extend(entries_of(
         vec![RecoveryResponse {

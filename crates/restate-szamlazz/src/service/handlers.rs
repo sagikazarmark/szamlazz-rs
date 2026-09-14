@@ -65,6 +65,8 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
+        #[cfg(feature = "test-util")]
+        self.require_supported_mutation()?;
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
         super::recovery::guard(&ctx).await?;
@@ -99,6 +101,8 @@ impl Order {
         request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
         let request = request.into_request()?;
+        #[cfg(feature = "test-util")]
+        self.require_initial_invoice(&request)?;
         let order = order_key(ctx.key())?;
         super::recovery::guard(&ctx).await?;
         let ctx = &ctx;
@@ -137,6 +141,8 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
+        #[cfg(feature = "test-util")]
+        self.require_supported_mutation()?;
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
         super::recovery::guard(&ctx).await?;
@@ -176,6 +182,8 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
+        #[cfg(feature = "test-util")]
+        self.require_supported_mutation()?;
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
         super::recovery::guard(&ctx).await?;
@@ -209,6 +217,8 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<CorrectRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
+        #[cfg(feature = "test-util")]
+        self.require_supported_mutation()?;
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
         super::recovery::guard(&ctx).await?;
@@ -241,6 +251,8 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<StornoRequest>,
     ) -> HandlerResult<Json<StornoResponse>> {
+        #[cfg(feature = "test-util")]
+        self.require_supported_mutation()?;
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
         super::recovery::guard(&ctx).await?;
@@ -278,6 +290,8 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<DeleteProformaRequest>,
     ) -> HandlerResult<Json<DeleteProformaResponse>> {
+        #[cfg(feature = "test-util")]
+        self.require_supported_mutation()?;
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
         super::recovery::guard(&ctx).await?;
@@ -356,6 +370,8 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<crate::contract::recovery::RecoveryRequest>,
     ) -> HandlerResult<Json<crate::contract::recovery::RecoveryResponse>> {
+        #[cfg(feature = "test-util")]
+        self.require_supported_mutation()?;
         self.recover_marker(&ctx, request.into_request()?)
             .await
             .map(Json)
@@ -509,6 +525,8 @@ impl Agent {
         ctx: Context<'_>,
         request: Body<SetCreditEntriesRequest>,
     ) -> HandlerResult<Json<SetCreditEntriesResponse>> {
+        #[cfg(feature = "test-util")]
+        self.require_supported_mutation()?;
         let request = request.into_request()?;
         super::agent::validate_credit_entries(&request)?;
         let ctx = &ctx;
@@ -543,6 +561,8 @@ impl Agent {
         ctx: Context<'_>,
         request: Body<StornoRequest>,
     ) -> HandlerResult<Json<StornoResponse>> {
+        #[cfg(feature = "test-util")]
+        self.require_supported_mutation()?;
         let request = request.into_request()?;
         let ctx = &ctx;
         self.execute(ctx, |execution| async move {

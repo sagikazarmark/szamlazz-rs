@@ -90,17 +90,23 @@ async fn e2e_replay_filter_keeps_fresh_operation_logs_and_correlation() {
         })
         .await;
     let mock = wiremock::MockServer::start().await;
-    for (selector, code) in [
-        ("logs:check-account", "7"),
-        ("fresh:check-account", "42"),
-        ("LOG-1", "135"),
-    ] {
+    for (selector, code) in [("logs:check-account", "7"), ("LOG-1", "135")] {
         wiremock::Mock::given(wiremock::matchers::body_string_contains(selector))
             .respond_with(api_error(code, "scripted answer"))
             .expect(1)
             .mount(&mock)
             .await;
     }
+    // ADR 0018 made non-credential probe codes inconclusive. A valid sentinel
+    // holder supplies positive evidence and a fresh Gateway warning, allowing
+    // the test to reach the separately scripted credential rejection below.
+    wiremock::Mock::given(wiremock::matchers::body_string_contains(
+        "fresh:check-account",
+    ))
+    .respond_with(crate::test_support::Doc::of("SENTINEL-1", "SZ", "SENTINEL").response())
+    .expect(1)
+    .mount(&mock)
+    .await;
     let config: StaticConfig = serde_json::from_value(json!({"accounts": {"acme": {
         "id": "logging-account", "agent_key": "logging-test-key", "endpoint": mock.uri()
     }}}))
@@ -153,7 +159,7 @@ async fn e2e_replay_filter_keeps_fresh_operation_logs_and_correlation() {
     );
     for message in [
         "fresh external operation",
-        "the probe was answered with a non-credential code",
+        "a document carries the probe's sentinel external id",
         "szamlazz.hu rejected the agent credentials",
     ] {
         let events: Vec<_> = logs.lines().filter(|line| line.contains(message)).collect();

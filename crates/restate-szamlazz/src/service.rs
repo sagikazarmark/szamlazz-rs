@@ -72,6 +72,8 @@ mod agent;
 mod body;
 mod create;
 mod delete;
+#[cfg(feature = "test-util")]
+mod experimental;
 mod handlers;
 mod ingress;
 #[cfg(test)]
@@ -131,6 +133,8 @@ impl Parts {
 pub struct Order {
     parts: Parts,
     #[cfg(feature = "test-util")]
+    experimental_request_response: bool,
+    #[cfg(feature = "test-util")]
     write_observer: Option<std::sync::Arc<dyn WriteObserver>>,
 }
 
@@ -150,6 +154,8 @@ impl Order {
     pub fn from_parts(accounts: Accounts, config: ValidatedWorkerConfig) -> Self {
         Self {
             parts: Parts { accounts, config },
+            #[cfg(feature = "test-util")]
+            experimental_request_response: false,
             #[cfg(feature = "test-util")]
             write_observer: None,
         }
@@ -181,6 +187,7 @@ impl Order {
                 let execution = {
                     let mut execution = execution;
                     execution.write_observer.clone_from(&self.write_observer);
+                    execution.experimental_request_response = self.experimental_request_response;
                     execution
                 };
                 body(execution)
@@ -209,6 +216,8 @@ impl Order {
 #[derive(Debug, Clone)]
 pub struct Agent {
     parts: Parts,
+    #[cfg(feature = "test-util")]
+    experimental_request_response: bool,
 }
 
 impl Agent {
@@ -219,6 +228,8 @@ impl Agent {
     pub fn from_parts(accounts: Accounts, config: ValidatedWorkerConfig) -> Self {
         Self {
             parts: Parts { accounts, config },
+            #[cfg(feature = "test-util")]
+            experimental_request_response: false,
         }
     }
 
