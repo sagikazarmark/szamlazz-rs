@@ -1,9 +1,12 @@
 # Actual Order/Agent on Cloudflare Workers (#247)
 
-An **experimental**, explicitly selected endpoint for initial ordinary invoices and
-reads. It embeds the real services, including input/money validation, account
+An **experimental**, explicitly selected endpoint for ordinary invoices (including
+exact-target reissue and pinned proforma conversion), reads and operator recovery.
+It embeds the real services, including input/money validation, account
 resolution, fresh guards, unresolved markers and read-only reconciliation.
-It does not approve additional mutations, marker recovery or production migration.
+It does not approve additional mutation types or production migration. The ingress
+gateway must authorize operator observation/recovery separately; request signatures
+authenticate Restate, not the recovery operator.
 
 ## Build and run
 
@@ -123,7 +126,7 @@ unsigned discovery refusal. The Rust test uses real Restate ingress to exercise:
 - Issuance and completed replay with credential acquisition unavailable.
 - JS-backed resolver/store deadlines, retry sleep and marker timestamps.
 - Runtime replacement while a provider answer is in flight: a visible holder
-  settles without a second send.
+  settles without a second send, including reissue and proforma conversion.
 - Recorded uncertainty, replacement, read-only pause/resume, later positive
   evidence, active cancellation, and no-effect kill followed by a blocked successor.
 - Unsupported mutations refused before provider I/O and journal privacy.

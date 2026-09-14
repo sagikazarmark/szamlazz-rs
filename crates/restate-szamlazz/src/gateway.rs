@@ -422,6 +422,13 @@ pub enum CreateStepRequestError {
 }
 
 impl<'a> CreateStepRequest<'a> {
+    #[cfg(feature = "test-util")]
+    pub(crate) fn proforma_number(&self) -> Option<&str> {
+        self.create
+            .kind
+            .proforma_number()
+            .map(szamlazz_agent::InvoiceNumber::as_str)
+    }
     /// Check the outbound request against the identity to look up and retain.
     /// `corrected_number` must name the intended base for a corrective and be
     /// `None` otherwise. Comparisons do not trim or normalize either side.
@@ -1358,6 +1365,7 @@ impl Gateway {
                     if is_foreign(&hint, request.our_numbers, seen)
                         || (block_proforma
                             && hint.is_live()
+                            && !request.our_numbers.contains(&hint.number)
                             && hint.document_type == szamlazz_agent::DocumentType::Proforma)
                     {
                         tracing::warn!(

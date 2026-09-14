@@ -81,7 +81,8 @@ async fn serve(
         ),
     );
     // Required: a trusted ingress gateway selects scope, and only the signed
-    // Restate runtime can address this endpoint. Recovery is blocked in this slice.
+    // Restate runtime can address this endpoint. The ingress gateway must
+    // separately authorize operator access to observe_unresolved and recover.
     let identity = env.var("RESTATE_IDENTITY_KEY")?.to_string();
     let endpoint = restate_sdk::prelude::Endpoint::builder()
         .bind(order)

@@ -101,8 +101,6 @@ impl Order {
         request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
         let request = request.into_request()?;
-        #[cfg(feature = "test-util")]
-        self.require_initial_invoice(&request)?;
         let order = order_key(ctx.key())?;
         super::recovery::guard(&ctx).await?;
         let ctx = &ctx;
@@ -370,9 +368,8 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<crate::contract::recovery::RecoveryRequest>,
     ) -> HandlerResult<Json<crate::contract::recovery::RecoveryResponse>> {
-        #[cfg(feature = "test-util")]
-        self.require_supported_mutation()?;
-        self.recover_marker(&ctx, request.into_request()?)
+        let (request, raw) = request.into_request_with_json()?;
+        self.recover_marker(&ctx, request, raw["marker"].clone())
             .await
             .map(Json)
     }

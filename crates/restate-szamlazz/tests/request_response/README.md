@@ -19,6 +19,13 @@ behavior. This is not yet a Workers adapter. The test host fully buffers both SD
 input and output and alternates two independent endpoint instances; ordinary SDK
 suspension cannot rely on streaming acknowledgements.
 
+The ordinary extension also exercises exact-target reissue, `auto` and named
+proforma conversion, and existing recovery for both legacy/ordinary markers. It
+checks visible/invisible interrupted reissue, a disappeared expected holder,
+consumed/replaced proformas and newly appearing proformas after pinned no-link.
+Recorded uncertainty stays read-only. Conversion success establishes issuance,
+not verified linkage; recovery uses exact marker echoes and pinned accounts.
+
 ## Observations from the actual-service implementation
 
 | Scenario | Sends | Fake documents | Result |

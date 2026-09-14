@@ -28,7 +28,8 @@ const STATE: &str = "unresolved-write";
 /// A distinct serialized run result as well as state discriminator. Run names
 /// alone are not an exceptional-replay fence: an old prepare-write result must
 /// fail decoding rather than become ordinary resend permission.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(transparent)]
 #[cfg_attr(
     not(feature = "test-util"),
     allow(
@@ -37,15 +38,19 @@ const STATE: &str = "unresolved-write";
     )
 )]
 pub(super) struct OrdinaryIntent {
-    execution_contract: OrdinaryContract,
-    #[serde(flatten)]
     marker: UnresolvedWrite,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-enum OrdinaryContract {
-    #[serde(rename = "request_response_ordinary_v1")]
-    RequestResponseOrdinaryV1,
+impl<'de> serde::Deserialize<'de> for OrdinaryIntent {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let marker = UnresolvedWrite::deserialize(de)?;
+        if marker.execution_contract.is_none() {
+            return Err(serde::de::Error::custom(
+                "ordinary intent requires execution contract",
+            ));
+        }
+        Ok(Self { marker })
+    }
 }
 
 impl OrdinaryIntent {
@@ -53,11 +58,10 @@ impl OrdinaryIntent {
         not(feature = "test-util"),
         allow(dead_code, reason = "experimental constructor")
     )]
-    pub(super) fn new(marker: UnresolvedWrite) -> Self {
-        Self {
-            execution_contract: OrdinaryContract::RequestResponseOrdinaryV1,
-            marker,
-        }
+    pub(super) fn new(mut marker: UnresolvedWrite) -> Self {
+        marker.execution_contract =
+            Some(crate::contract::recovery::OrdinaryExecutionContract::RequestResponseOrdinaryV1);
+        Self { marker }
     }
 }
 
@@ -115,6 +119,14 @@ impl Order {
             None => UnresolvedObservation::Absent,
             Some(raw) => {
                 if let Some(marker) = decode_marker(&raw, ctx.scope(), ctx.key()) {
+                    let value: serde_json::Value = serde_json::from_slice(&raw)
+                        .map_err(|_| Fault::unavailable("could not read marker JSON"))?;
+                    if serde_json::to_value(&marker).ok().as_ref() != Some(&value) {
+                        return Ok(UnresolvedObservation::Other {
+                            state: "unresolved".into(),
+                            fields: serde_json::Map::from_iter([("marker".into(), value)]),
+                        });
+                    }
                     UnresolvedObservation::Unresolved {
                         marker: Box::new(marker),
                     }
@@ -138,6 +150,7 @@ impl Order {
         &self,
         ctx: &ObjectContext<'_>,
         request: RecoveryRequest,
+        exact_marker: serde_json::Value,
     ) -> Result<RecoveryResponse, HandlerError> {
         let sdk_span = tracing::Span::current();
         let span =
@@ -145,7 +158,8 @@ impl Order {
         super::prologue::SDK_SPAN
             .scope(
                 sdk_span,
-                self.recover_marker_inner(ctx, request).instrument(span),
+                self.recover_marker_inner(ctx, request, exact_marker)
+                    .instrument(span),
             )
             .await
     }
@@ -158,6 +172,7 @@ impl Order {
         &self,
         ctx: &ObjectContext<'_>,
         request: RecoveryRequest,
+        exact_marker: serde_json::Value,
     ) -> Result<RecoveryResponse, HandlerError> {
         let raw = ctx
             .get::<bytes::Bytes>(STATE)
@@ -167,7 +182,9 @@ impl Order {
         let marker = decode_marker(&raw, ctx.scope(), ctx.key()).ok_or_else(|| {
             Fault::outcome_unknown("unreadable unresolved marker; use a compatible deployment")
         })?;
-        if marker != request.marker {
+        let stored: serde_json::Value = serde_json::from_slice(&raw)
+            .map_err(|_| Fault::outcome_unknown("unreadable marker JSON"))?;
+        if marker != request.marker || stored != exact_marker {
             return Err(Fault::invalid_input(
                 "recovery does not match the exact unresolved marker",
             )
@@ -296,6 +313,26 @@ fn validate_completion(
 
 fn decode_marker(raw: &[u8], scope: Option<&str>, key: &str) -> Option<UnresolvedWrite> {
     let marker: UnresolvedWrite = serde_json::from_slice(raw).ok()?;
+    if marker.execution_contract.is_some() {
+        if !matches!(
+            marker.operation,
+            WriteOperation::Create {
+                kind: crate::identity::IssuedKind::Invoice,
+                corrected_number: None,
+                ..
+            }
+        ) {
+            return None;
+        }
+        if marker.proforma_number.as_ref().is_some_and(|n| {
+            n.parse::<crate::contract::ProviderDocumentNumber>()
+                .is_err()
+        }) {
+            return None;
+        }
+    } else if marker.proforma_number.is_some() {
+        return None;
+    }
     if marker.scope.as_deref() != scope
         || marker.order.as_str() != key
         || marker.token.is_empty()
@@ -395,6 +432,8 @@ impl Execution {
         external_id: &ExternalId,
     ) -> Result<WriteResult, HandlerError> {
         let marker = UnresolvedWrite {
+            execution_contract: None,
+            proforma_number: request.proforma_number().map(str::to_owned),
             version: MarkerVersion,
             token: ctx.invocation_id().to_owned(),
             owner_invocation: ctx.invocation_id().to_owned(),
@@ -442,16 +481,24 @@ impl Execution {
         let result = ctx
             .run(|| async {
                 super::prologue::mark_fresh_work();
-                let result = match self.gateway().await {
-                    Ok(gateway) => {
-                        gateway
-                            .ordinary_request_response(request, || {
-                                self.checkpoint(order, WriteCheckpoint::OrdinaryGuardsPassed)
-                            })
-                            .await
-                    }
-                    Err(_) => {
-                        WriteResult::unresolved("pinned account unavailable inside ordinary write")
+                let result = if marker.operation != request.operation()
+                    || marker.proforma_number.as_deref() != request.proforma_number()
+                {
+                    WriteResult::unresolved(
+                        "outbound request differs from retained ordinary intent",
+                    )
+                } else {
+                    match self.gateway().await {
+                        Ok(gateway) => {
+                            gateway
+                                .ordinary_request_response(request, || {
+                                    self.checkpoint(order, WriteCheckpoint::OrdinaryGuardsPassed)
+                                })
+                                .await
+                        }
+                        Err(_) => WriteResult::unresolved(
+                            "pinned account unavailable inside ordinary write",
+                        ),
                     }
                 };
                 self.checkpoint(order, WriteCheckpoint::Sent).await;
@@ -495,6 +542,8 @@ impl Execution {
         Fut: Future<Output = WriteResult> + Send,
     {
         let marker = UnresolvedWrite {
+            execution_contract: None,
+            proforma_number: None,
             version: MarkerVersion,
             token: ctx.invocation_id().to_owned(),
             owner_invocation: ctx.invocation_id().to_owned(),

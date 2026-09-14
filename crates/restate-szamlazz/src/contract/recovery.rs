@@ -79,6 +79,14 @@ super::object::object_input! {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct UnresolvedWrite {
+    /// Ordinary `RequestResponse` execution contract, absent on legacy protected
+    /// markers. Unknown tokens cannot authorize recovery or resend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_contract: Option<OrdinaryExecutionContract>,
+    /// Pinned proforma reference submitted with ordinary issuance. Omission
+    /// means no explicit link; recovery establishes issuance, not linkage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proforma_number: Option<String>,
     /// Explicit state schema version.
     pub version: MarkerVersion,
     /// Unique marker token, the original invocation id.
@@ -108,6 +116,15 @@ pub struct UnresolvedWrite {
     /// Minimal operation-specific recovery intent.
     pub operation: WriteOperation,
 }
+}
+
+/// The ordinary replay-risk contract; never inferred from the hosting target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub enum OrdinaryExecutionContract {
+    /// Ordinary issuance with fresh checks before unfinished-run resubmission.
+    #[serde(rename = "request_response_ordinary_v1")]
+    RequestResponseOrdinaryV1,
 }
 
 fn exact_order_key<'de, D: Deserializer<'de>>(de: D) -> Result<OrderKey, D::Error> {
@@ -346,9 +363,13 @@ impl<'de> Deserialize<'de> for UnresolvedObservation {
                 let marker = fields.get("marker").cloned().ok_or_else(|| {
                     serde::de::Error::custom("unresolved observation requires marker")
                 })?;
-                match serde_json::from_value(marker) {
-                    Ok(marker) => Ok(Self::Unresolved { marker }),
-                    Err(_) => Ok(Self::Other { state, fields }),
+                match serde_json::from_value::<Box<UnresolvedWrite>>(marker.clone()) {
+                    Ok(decoded)
+                        if serde_json::to_value(&decoded).ok().as_ref() == Some(&marker) =>
+                    {
+                        Ok(Self::Unresolved { marker: decoded })
+                    }
+                    _ => Ok(Self::Other { state, fields }),
                 }
             }
             _ => Ok(Self::Other { state, fields }),

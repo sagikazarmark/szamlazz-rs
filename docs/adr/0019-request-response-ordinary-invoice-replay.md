@@ -155,6 +155,37 @@ the production settlement/migration gates or establish Workers runtime support.
 
 ## Workers host experiment (2026-09-14)
 
+### Shared ordinary extension (agreed 2026-09-14)
+
+The user approved extending the same native/Workers `create_invoice` handler to
+reissue and proforma conversion and enabling existing operator recovery. Reissue
+keeps the exact expected old invoice; an executing open run may resubmit only while
+that holder is still reversed and all fresh guards pass. A different matching
+holder settles issuance under the already accepted newest-holder non-regression
+premise; an absent holder never becomes permission for initial creation.
+
+Proforma `auto`/`none`/named selection is pinned by completed prerequisite reads,
+retained as `proforma_number` in the ordinary marker, and checked against the
+outbound request. Named selection requires a live proforma of this Order. A fresh
+check refuses a missing/reversed pinned proforma or a different live namespace
+holder/order hint. No-link stays no-link. Positive invoice evidence takes precedence
+over a now-consumed proforma. Success means issuance, not independently verified
+provider linkage; the queried invoice exposes its reference for caller policy.
+
+Both `observe_unresolved` and `recover` understand legacy markers and the known
+ordinary discriminator. Exact equality, pinned account verification, evidence
+rules and recorded recovery before clearance remain shared. Unknown contracts
+remain blocking; recovery never sends. Hosts must authorize recovery access.
+The added optional marker fields preserve decoding of prior populated markers;
+legacy deployments reject the extended shape. The ordinary prepare-run wrapper
+still requires its discriminator, so legacy prepare replay cannot grant resend
+permission. Exceptional replay still requires invocation-specific review.
+
+This extends the initial-slice exclusions above, not the remaining operation kinds
+or production rollout/migration. The explicit opt-in remains on either host.
+
+### Host and transport
+
 The [workers-rs example](../../examples/workers/README.md) now builds and runs the
 actual restricted services in workerd with the pinned interim SDK fix. Signed,
 scoped issuance, open-execution replacement, retained uncertainty, pause/resume,

@@ -193,6 +193,10 @@ impl Gateway {
     /// #247 only: open-run replay may submit again after fresh absence and
     /// guards. Kept distinct from the public consumed-permission contract.
     #[cfg(feature = "test-util")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "keep fresh target, cross-kind and pinned proforma guards in send order"
+    )]
     pub(crate) async fn ordinary_request_response<F, Fut>(
         &self,
         request: super::CreateStepRequest<'_>,
@@ -204,17 +208,30 @@ impl Gateway {
     {
         use crate::identity::{DocumentKind, IssuedKind};
         // Defence in depth: this seam is never a blanket permission for kinds.
-        if request.kind != IssuedKind::Invoice
-            || request.reversed.is_some()
-            || request.corrected_number.is_some()
-        {
+        if request.kind != IssuedKind::Invoice || request.corrected_number.is_some() {
             return WriteResult::unresolved("unsupported experimental ordinary intent");
         }
-        match self.settled_by_query(&request, true).await {
-            Ok(Some(outcome)) => {
-                return ordinary_result(Ok(outcome), request.external_id.namespace());
+        // After admission a different matching holder is replacement evidence,
+        // not a new target to send past. The expected old holder alone can permit
+        // a resend, and only while it remains reversed.
+        match self
+            .seen(request.external_id, request.order, request.kind)
+            .await
+        {
+            Ok(super::Seen::Absent) if request.reversed.is_none() => {}
+            Ok(super::Seen::Reversed(found)) if request.reversed == Some(found.number.as_str()) => {
             }
-            Ok(None) => {}
+            Ok(super::Seen::Live(found)) if request.reversed != Some(found.number.as_str()) => {
+                return WriteResult::Create(CreateOutcome::Found(found));
+            }
+            Ok(super::Seen::Reversed(found)) => {
+                return WriteResult::Create(CreateOutcome::Reversed(found));
+            }
+            Ok(_) => {
+                return WriteResult::unresolved(
+                    "ordinary holder does not permit the retained issuance intent",
+                );
+            }
             Err(QueryError::CredentialsRejected(answer)) => {
                 answer.warn_credentials_rejected(request.external_id.namespace());
                 return WriteResult::unresolved(format!(
@@ -227,6 +244,7 @@ impl Gateway {
         let Ok(namespace) = request.external_id.namespace().parse() else {
             return WriteResult::unresolved("invalid ordinary namespace");
         };
+        let proforma = request.proforma_number();
         for kind in [
             DocumentKind::Prepayment,
             DocumentKind::Final,
@@ -235,6 +253,9 @@ impl Gateway {
             let id = ExternalId::for_kind(&namespace, request.order, kind);
             match self.lookup_ours(&id, request.order, kind.into()).await {
                 Ok(super::OwnershipOutcome::Absent | super::OwnershipOutcome::Reversed(_)) => {}
+                Ok(super::OwnershipOutcome::Live(found))
+                    if kind == DocumentKind::Proforma
+                        && proforma == Some(found.number.as_str()) => {}
                 Ok(super::OwnershipOutcome::CredentialsRejected(answer)) => {
                     answer.warn_credentials_rejected(request.external_id.namespace());
                     return WriteResult::unresolved(format!(
@@ -246,6 +267,24 @@ impl Gateway {
                     return WriteResult::unresolved(format!(
                         "fresh {kind} guard did not permit ordinary issuance"
                     ));
+                }
+            }
+        }
+        if let Some(number) = proforma {
+            match self.verify(number).await {
+                Ok(super::QueryOutcome::Found(found))
+                    if found.carries_order(request.order)
+                        && found.document_type == szamlazz_agent::DocumentType::Proforma
+                        && found.is_live() => {}
+                Ok(super::QueryOutcome::CredentialsRejected(answer)) => {
+                    answer.warn_credentials_rejected(request.external_id.namespace());
+                    return WriteResult::unresolved(format!(
+                        "pinned proforma credentials rejected: {}",
+                        answer.code
+                    ));
+                }
+                _ => {
+                    return WriteResult::unresolved("pinned proforma no longer live on this Order");
                 }
             }
         }
@@ -262,7 +301,10 @@ impl Gateway {
                 ));
             }
             Ok(found)
-                if !found.is_live()
+                if (found.document_type == szamlazz_agent::DocumentType::Proforma
+                    && proforma == Some(found.number.as_str())
+                    && found.carries_order(request.order))
+                    || !found.is_live()
                     || (!found.is_invoice_family()
                         && found.document_type != szamlazz_agent::DocumentType::Proforma) => {}
             _ => {
@@ -748,6 +790,8 @@ mod tests {
             let gateway = open_gateway(account, Credentials::agent_key("key"));
             let id = ExternalId::new("acct:ORD-1:storno:SZ-1");
             let marker = UnresolvedWrite {
+                execution_contract: None,
+                proforma_number: None,
                 version: MarkerVersion,
                 token: "owner".into(),
                 owner_invocation: "owner".into(),
@@ -894,6 +938,8 @@ mod tests {
             let gateway = open_gateway(account, Credentials::agent_key("PRIVATE-KEY"));
             let external_id = ExternalId::new("acct:ORD-1:storno:SZ-1");
             let marker = UnresolvedWrite {
+                execution_contract: None,
+                proforma_number: None,
                 version: MarkerVersion,
                 token: "owner".into(),
                 owner_invocation: "owner".into(),
@@ -1129,6 +1175,8 @@ mod tests {
             account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
             let gateway = open_gateway(account, Credentials::agent_key("PRIVATE-KEY"));
             let marker = UnresolvedWrite {
+                execution_contract: None,
+                proforma_number: None,
                 version: MarkerVersion,
                 token: "owner".into(),
                 owner_invocation: "owner".into(),
@@ -1200,6 +1248,8 @@ mod tests {
         let gateway = open_gateway(account, Credentials::agent_key("PRIVATE-KEY"));
         let external_id = ExternalId::new("acct:ORD-1:storno:SZ-1");
         let marker = UnresolvedWrite {
+            execution_contract: None,
+            proforma_number: None,
             version: MarkerVersion,
             token: "owner".into(),
             owner_invocation: "owner".into(),
@@ -1265,6 +1315,8 @@ mod tests {
         let gateway = open_gateway(account, Credentials::agent_key("PRIVATE-KEY"));
         let external_id = ExternalId::new("acct:ORD-1:storno:SZ-1");
         let marker = UnresolvedWrite {
+            execution_contract: None,
+            proforma_number: None,
             version: MarkerVersion,
             token: "owner".into(),
             owner_invocation: "owner".into(),

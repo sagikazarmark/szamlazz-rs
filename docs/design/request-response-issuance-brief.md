@@ -165,7 +165,7 @@ generic mock of every Gateway method or treat source/binary searches as runtime 
 - [ ] Production outcome/clearance table and mutation capability matrix approved.
 - [ ] Legacy marker/recovery and immutable-deployment migration procedure approved.
 - [x] Actual Order/Agent workers-rs experimental release bundle builds with a documented feature graph (`examples/workers`).
-- [x] Real Restate + workerd verify signed/scoped execution, replay, pause and automatic read-only reconciliation; operator recovery remains blocked by the slice.
+- [x] Real Restate + workerd verify signed/scoped execution, replay, pause, read-only reconciliation and shared operator recovery; ordinary reissue/conversion extension is agreed in ADR 0019.
 - [x] Shared szamlazz-agent/reqwest transport, complete-body deadline and dropped-exchange cancellation checks pass; native and Workers use the same client (ADR 0019 transport correction).
 - [ ] Required native regressions pass; CI includes bundle and runtime checks.
 - [ ] Embedding, provider-setting prerequisite, residual risk and unsupported operations documented.

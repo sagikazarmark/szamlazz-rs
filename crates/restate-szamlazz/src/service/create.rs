@@ -584,15 +584,6 @@ impl Execution {
         kind: DocumentKind,
         request: CreateRequest,
     ) -> Result<CreateResponse, HandlerError> {
-        // The experiment never converts a proforma, even under provider defaults.
-        #[cfg(feature = "test-util")]
-        let request = if self.experimental_request_response {
-            let mut request = request;
-            request.options.proforma = ProformaLink::None;
-            request
-        } else {
-            request
-        };
         // Step 0: validate (pure).
         let prepared = self.prepare(order, kind, request)?;
         let identity = Identity::of_kind(&self.config.namespace, &prepared.order, kind);
@@ -630,6 +621,37 @@ impl Execution {
                 .await?
         {
             return Ok(response);
+        }
+
+        #[cfg(feature = "test-util")]
+        if self.experimental_request_response
+            && matches!(prepared.proforma, ProformaLink::Number(_))
+        {
+            let slot = ExternalId::for_kind(
+                &self.config.namespace,
+                &prepared.order,
+                DocumentKind::Proforma,
+            );
+            let found = lookup(
+                ctx,
+                self,
+                "lookup-proforma",
+                &slot,
+                &prepared.order,
+                IssuedKind::Proforma,
+            )
+            .await?;
+            if !matches!(&found,OwnershipOutcome::Live(document) if refs.proforma.as_deref()==Some(document.number.as_str()))
+                && let Some(response) = decide_exclusivity(
+                    found,
+                    ConflictReason::ProformaLive,
+                    &identity,
+                    &self.config.namespace,
+                )
+                .map_err(|fault| identity.about(&prepared.order, fault))?
+            {
+                return Ok(response);
+            }
         }
 
         let create = self.build(
@@ -898,6 +920,17 @@ impl Execution {
                 let found = verify(ctx, self, format!("verify-proforma-{number}"), number)
                     .await
                     .map_err(|fault| identity.about(&prepared.order, fault))?;
+                #[cfg(feature = "test-util")]
+                if self.experimental_request_response
+                    && let QueryOutcome::Found(document) = &found
+                    && document.carries_order(&prepared.order)
+                    && document.document_type == DocumentType::Proforma
+                    && !document.is_live()
+                {
+                    return Ok(Some(
+                        identity.conflict_about(ConflictReason::ProformaMissing, number),
+                    ));
+                }
                 decide_proforma_by_number(
                     found,
                     number,

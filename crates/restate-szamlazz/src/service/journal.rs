@@ -157,6 +157,8 @@ fn entries() -> Vec<Entry> {
     use crate::gateway::recovery::WriteResult;
     let mut all = Vec::new();
     let marker = UnresolvedWrite {
+        execution_contract: None,
+        proforma_number: None,
         version: MarkerVersion,
         token: "inv-owner".into(),
         owner_invocation: "inv-owner".into(),

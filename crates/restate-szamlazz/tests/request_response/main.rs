@@ -3,6 +3,7 @@
 
 #[path = "../common/mod.rs"]
 mod common;
+mod extensions;
 
 use axum::{Router, body::Body, extract::State};
 use http_body_util::{BodyExt as _, Full};
@@ -343,7 +344,6 @@ async fn admission_cases(server: &Restate, mock: &wiremock::MockServer, lab: &Ar
         "correct_invoice",
         "storno_invoice",
         "delete_proforma",
-        "recover",
     ] {
         let response = server
             .invoke(
@@ -377,21 +377,6 @@ async fn admission_cases(server: &Restate, mock: &wiremock::MockServer, lab: &Ar
                 .contains("mutation unsupported")
         );
     }
-    for options in [
-        json!({"reissue":{"expected_number":"SZ-OLD"}}),
-        json!({"proforma":{"number":"D-1"}}),
-    ] {
-        let mut body = request();
-        body["options"] = options;
-        let response = server
-            .invoke(
-                &Call::object("Szamlazz.Order", "unsupported", "create_invoice"),
-                Some(&body),
-                None,
-            )
-            .await;
-        assert_eq!(response.status, 400, "{response:?}");
-    }
     let mut invalid = request();
     invalid["document"]["items"][0]["unit_price"] = json!("79228162514264337593543950335");
     invalid["document"]["items"][0]["quantity"] = json!("10");
@@ -423,7 +408,7 @@ async fn admission_cases(server: &Restate, mock: &wiremock::MockServer, lab: &Ar
         mount(mock, lab, key).await;
         lab.change(key, |s| s.guard = Some(guard));
         let mut body = request();
-        body["options"] = json!({}); // auto cannot convert either
+        body["options"] = json!({"proforma":"none"});
         let response = server
             .invoke(
                 &Call::object("Szamlazz.Order", key, "create_invoice"),
@@ -763,6 +748,11 @@ async fn e2e_request_response_actual_order() {
         )
         .await;
     assert_eq!(response.body["outcome"], "reconciled", "{response:?}");
+    extensions::reissue(&server, &mock).await;
+    extensions::conversion(&server, &mock).await;
+    extensions::recovery(&server, &mock).await;
+    extensions::marker_compatibility(&server, &mock).await;
+    extensions::interrupted(&server, &mock, &lab).await;
     for key in [
         "visible-crash",
         "invisible-crash",

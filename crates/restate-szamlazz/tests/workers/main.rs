@@ -439,7 +439,6 @@ async fn e2e_workers_signed_scoped_ordinary() {
         "correct_invoice",
         "storno_invoice",
         "delete_proforma",
-        "recover",
     ] {
         let response = server
             .invoke(
@@ -478,31 +477,171 @@ async fn e2e_workers_signed_scoped_ordinary() {
         mock.received_requests().await.expect("requests").len(),
         before
     );
-    for options in [
-        json!({"reissue":{"expected_number":"SZ-OLD"}}),
-        json!({"proforma":{"number":"D-1"}}),
+    for (key, number, options) in [
+        (
+            "REISSUE",
+            "OLD-1",
+            json!({"reissue":{"expected_number":"OLD-1"},"proforma":"none"}),
+        ),
+        ("CONVERT", "D-1", json!({"proforma":"auto"})),
+        ("NAMED", "D-2", json!({"proforma":{"number":"D-2"}})),
     ] {
+        let mut doc = common::Doc::of(number, if key == "REISSUE" { "SZ" } else { "D" }, key);
+        doc.reversed = key == "REISSUE";
+        common::external_id_query(&format!(
+            "workers:{key}:{}",
+            if key == "REISSUE" {
+                "invoice"
+            } else {
+                "proforma"
+            }
+        ))
+        .respond_with(doc.response())
+        .with_priority(1)
+        .mount(&mock)
+        .await;
+        common::number_query(number)
+            .respond_with(doc.response())
+            .with_priority(1)
+            .mount(&mock)
+            .await;
+        common::create_for(key)
+            .respond_with(move |r: &wiremock::Request| {
+                if key != "REISSUE" {
+                    assert!(String::from_utf8_lossy(&r.body).contains(&format!(
+                        "<dijbekeroSzamlaszam>{number}</dijbekeroSzamlaszam>"
+                    )));
+                }
+                common::created("NEW-EXTENSION", "1000", "1270")
+            })
+            .expect(1)
+            .mount(&mock)
+            .await;
         let mut body = request();
         body["options"] = options;
         let response = server
             .invoke(
-                &Call::object("Szamlazz.Order", "UNSUPPORTED-OPTION", "create_invoice")
-                    .scoped("alpha"),
+                &Call::object("Szamlazz.Order", key, "create_invoice").scoped("alpha"),
                 Some(&body),
                 None,
             )
             .await;
-        assert_eq!(response.status, 400);
-        assert!(
-            response.body["message"]
-                .as_str()
-                .expect("fault")
-                .contains("experimental RequestResponse")
-        );
+        assert_eq!(response.body["outcome"], "issued", "{key}: {response:?}");
     }
+    // The same unfinished-run rules hold after a real workerd replacement:
+    // replacement evidence wins over the old reissue/proforma prerequisites.
+    for (key, reissue) in [("REISSUE-REPLAY", true), ("CONVERSION-REPLAY", false)] {
+        let accepted = Arc::new(AtomicBool::new(false));
+        let reached = accepted.clone();
+        common::create_for(key)
+            .respond_with(move |r: &wiremock::Request| {
+                if !reissue {
+                    assert!(
+                        String::from_utf8_lossy(&r.body)
+                            .contains("<dijbekeroSzamlaszam>D-REPLAY</dijbekeroSzamlaszam>")
+                    );
+                }
+                reached.store(true, Ordering::SeqCst);
+                common::created("REPLACEMENT-1", "1000", "1270").set_delay(Duration::from_secs(20))
+            })
+            .expect(1)
+            .mount(&mock)
+            .await;
+        let reached = accepted.clone();
+        common::external_id_query(&format!("workers:{key}:invoice"))
+            .respond_with(move |_: &wiremock::Request| {
+                if reached.load(Ordering::SeqCst) {
+                    return common::Doc::of("REPLACEMENT-1", "SZ", key).response();
+                }
+                if reissue {
+                    let mut old = common::Doc::of("OLD-REPLAY", "SZ", key);
+                    old.reversed = true;
+                    return old.response();
+                }
+                common::not_found()
+            })
+            .with_priority(1)
+            .mount(&mock)
+            .await;
+        if !reissue {
+            let reached = accepted.clone();
+            common::external_id_query(&format!("workers:{key}:proforma"))
+                .respond_with(move |_: &wiremock::Request| {
+                    if reached.load(Ordering::SeqCst) {
+                        common::not_found()
+                    } else {
+                        common::Doc::of("D-REPLAY", "D", key).response()
+                    }
+                })
+                .with_priority(1)
+                .mount(&mock)
+                .await;
+            common::number_query("D-REPLAY")
+                .respond_with(common::Doc::of("D-REPLAY", "D", key).response())
+                .with_priority(1)
+                .mount(&mock)
+                .await;
+        }
+        let mut body = request();
+        body["options"] = if reissue {
+            json!({"reissue":{"expected_number":"OLD-REPLAY"},"proforma":"none"})
+        } else {
+            json!({"proforma":"auto"})
+        };
+        let call = Call::object("Szamlazz.Order", key, "create_invoice").scoped("alpha");
+        let started = server.invoke(&call.send(), Some(&body), Some(key)).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !accepted.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("extension send reached provider");
+        common::http_client()
+            .post(format!("{uri}/__interrupt"))
+            .send()
+            .await
+            .expect("replace worker")
+            .error_for_status()
+            .expect("replacement status");
+        server
+            .admin()
+            .await_status(started.invocation_id(), &["completed"])
+            .await;
+        let response = server.invoke(&call, Some(&body), Some(key)).await;
+        assert_eq!(response.body["outcome"], "issued", "{key}: {response:?}");
+        assert_eq!(response.body["invoice_number"], "REPLACEMENT-1");
+    }
+    let observation = server
+        .invoke(
+            &Call::object("Szamlazz.Order", "NO-EFFECT", "observe_unresolved").scoped("alpha"),
+            None,
+            None,
+        )
+        .await;
+    let body = json!({"operator":"test-operator","marker":observation.body["marker"],"evidence":{"type":"not_executed","audit_reference":"INC-WORKER","did_not_execute_and_cannot_execute_later":true}});
+    let recover = Call::object("Szamlazz.Order", "NO-EFFECT", "recover").scoped("alpha");
+    let recovered = server
+        .invoke(&recover, Some(&body), Some("recover-worker"))
+        .await;
+    assert_eq!(recovered.status, 200, "{recovered:?}");
     assert_eq!(
-        mock.received_requests().await.expect("requests").len(),
-        before
+        server
+            .invoke(
+                &Call::object("Szamlazz.Order", "NO-EFFECT", "observe_unresolved").scoped("alpha"),
+                None,
+                None
+            )
+            .await
+            .body["state"],
+        "absent"
+    );
+    assert_eq!(
+        server
+            .invoke(&recover, Some(&body), Some("recover-worker"))
+            .await
+            .body,
+        recovered.body
     );
     let mut document = common::Doc::of("FACTS-1", "SZ", "FACTS");
     document.net = "9007199254740993.01";

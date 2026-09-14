@@ -27,15 +27,24 @@ are computed or validated against caller assertions, domain outcomes are returne
 
 An isolated **#247 RequestResponse experiment** is available behind `test-util`,
 explicitly selected on both services with `.experimental_request_response()`.
-It supports initial ordinary invoices and reads only, requires operator-confirmed
+It supports ordinary invoices including exact-target reissue and pinned proforma
+conversion, reads and evidence-carrying recovery; it requires operator-confirmed
 provider duplicate-order checking, and accepts unfinished-run resubmission risk.
 Recorded uncertainty stays read-only; other mutations are refused. See the
 [actual-service experiment](tests/request_response/README.md) and
 [outcome/clearance table](../../docs/design/request-response-outcomes.md).
 The [workers-rs example](../../examples/workers/README.md) now exercises this slice
 in workerd with signed/scoped Restate calls. It documents the interim SDK patch,
-Fetch transport restriction and runtime checks. Production capability/settlement
+shared reqwest transport and runtime checks. Production capability/settlement
 and migration approvals remain open; the table below describes the default services.
+
+The recovery marker now carries optional `execution_contract` and `proforma_number`
+fields. Existing JSON markers remain decodable; Rust code constructing
+`UnresolvedWrite` literals supplies `None` for legacy markers. Recovery requires
+the exact observed JSON, including omitted versus null members. The observation
+decoder preserves noncanonical known markers through `Other`; echo those fields
+as JSON rather than reconstructing a marker. The ordinary prepare result still
+requires its discriminator, so a legacy prepare cannot become resend permission.
 
 | Operation | Protection and recovery |
 |---|---|
