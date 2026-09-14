@@ -1,5 +1,12 @@
 # Actual Order RequestResponse experiment (#247)
 
+Agent credit-entry scenarios are shared with the workerd suite in
+`tests/common/credit_scenarios.rs`: exact money and normal additive/replacement
+requests, recorded success/fault replay, lost answers, refused/credential/mismatched
+identity answers, cancellation, and interrupted execution with independently counted
+effects. Additive replay appends twice; replacement replay can overwrite a newer
+external entry. These existing risks require caller-owned settlement.
+
 Storno coverage includes shared Order/Agent normal execution, visible reversal
 recovery, unfinished-run resubmission, changed original date/appearance/id/Order,
 later refusal, recorded uncertainty, same-number and unnumbered acknowledgements,

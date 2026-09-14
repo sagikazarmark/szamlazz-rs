@@ -249,7 +249,24 @@ identity. Evidence does not prove notification delivery or exclude delayed old
 execution. This accepts observed repeat-storno behavior rather than a universal
 exactly-once guarantee. Agent storno retains its existing query-first issue policy,
 no-Order guard, acknowledgement/no-op behavior and lack of an Order marker.
-Credits and corrective issuance remain outside the experimental subset.
+At this stage credits and corrective issuance were excluded; credit entries are
+enabled by the subsequent decision below. Corrective issuance remains excluded.
+
+### Agent credit-entry support (agreed)
+
+The user approved enabling the existing unkeyed `set_credit_entries` contract on
+the experimental endpoint, rather than inventing Order-style protection. Native
+and workerd run the same handler. Its existing one-exchange run does not deliberately
+retry, but unrecorded interruption can repeat additive entries or overwrite newer
+state in replacement mode. Recorded uncertainty becomes the existing fault, never
+an internal re-query/retry loop. Caller-owned settlement before renewal remains.
+No marker or separate credit-entry recovery is introduced. Shared runtime tests
+explicitly demonstrate these effects and completed replay without another call.
+
+All Agent handlers are now enabled with their default semantics; the test-util
+Agent opt-in is retained as a no-op for existing experimental wiring. Only Order
+still selects an experimental protocol. Corrective issuance and production
+enablement/migration remain open.
 
 ### Host and transport behavior
 

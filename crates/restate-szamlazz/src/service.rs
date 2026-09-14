@@ -217,8 +217,6 @@ impl Order {
 #[derive(Debug, Clone)]
 pub struct Agent {
     parts: Parts,
-    #[cfg(feature = "test-util")]
-    experimental_request_response: bool,
 }
 
 impl Agent {
@@ -229,8 +227,6 @@ impl Agent {
     pub fn from_parts(accounts: Accounts, config: ValidatedWorkerConfig) -> Self {
         Self {
             parts: Parts { accounts, config },
-            #[cfg(feature = "test-util")]
-            experimental_request_response: false,
         }
     }
 

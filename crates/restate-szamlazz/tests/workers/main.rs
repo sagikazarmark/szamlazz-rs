@@ -3,6 +3,8 @@
 
 #[path = "../common/mod.rs"]
 mod common;
+#[path = "../common/credit_scenarios.rs"]
+mod credit_scenarios;
 use restate_e2e_harness::{
     Call, ServerSpec,
     gate::{PROTOCOL_V7, ReusePolicy, SCOPED_VIRTUAL_OBJECTS, VQUEUES, launcher_or_skip},
@@ -449,23 +451,6 @@ async fn e2e_workers_signed_scoped_ordinary() {
             "{handler}: {response:?}"
         );
     }
-    for handler in ["set_credit_entries"] {
-        let response = server
-            .invoke(
-                &Call::service("Szamlazz.Agent", handler).scoped("alpha"),
-                Some(&json!({})),
-                None,
-            )
-            .await;
-        assert_eq!(response.status, 400);
-        assert!(
-            response.body["message"]
-                .as_str()
-                .expect("fault")
-                .contains("mutation unsupported"),
-            "{handler}: {response:?}"
-        );
-    }
     assert_eq!(
         mock.received_requests().await.expect("requests").len(),
         before
@@ -664,6 +649,16 @@ async fn e2e_workers_signed_scoped_ordinary() {
     chain_lifecycle(&server, &mock, uri).await;
     chain_resubmission(&server, &mock, uri).await;
     storno_lifecycle(&server, &mock, uri).await;
+    credit_scenarios::run(&server, &mock, Some("alpha"), || async {
+        common::http_client()
+            .post(format!("{uri}/__interrupt"))
+            .send()
+            .await
+            .expect("interrupt credits")
+            .error_for_status()
+            .expect("interrupted");
+    })
+    .await;
     server.finish().await;
     host.finish();
 }

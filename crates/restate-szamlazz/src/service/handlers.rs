@@ -512,8 +512,6 @@ impl Agent {
         ctx: Context<'_>,
         request: Body<SetCreditEntriesRequest>,
     ) -> HandlerResult<Json<SetCreditEntriesResponse>> {
-        #[cfg(feature = "test-util")]
-        self.require_supported_mutation()?;
         let request = request.into_request()?;
         super::agent::validate_credit_entries(&request)?;
         let ctx = &ctx;

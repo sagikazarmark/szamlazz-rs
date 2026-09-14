@@ -21,17 +21,13 @@ impl Order {
 }
 
 impl Agent {
-    /// Enable reads and existing unmanaged storno for the isolated #247
-    /// `RequestResponse` endpoint. Credit-entry writes remain refused.
+    /// Select the Agent alongside the isolated #247 `RequestResponse` Order.
+    /// All Agent handlers now use their existing shared behavior on either host;
+    /// this compatibility method makes no changes to execution semantics.
     /// Enable alongside [`Order::experimental_request_response`].
     #[must_use]
-    pub fn experimental_request_response(mut self) -> Self {
-        self.experimental_request_response = true;
+    pub fn experimental_request_response(self) -> Self {
         self
-    }
-
-    pub(super) fn require_supported_mutation(&self) -> Result<(), Fault> {
-        require_supported(self.experimental_request_response)
     }
 }
 

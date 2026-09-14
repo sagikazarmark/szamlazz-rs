@@ -90,9 +90,20 @@ async fn serve(
     // Restate runtime can address this endpoint. The ingress gateway must
     // separately authorize operator access to observe_unresolved and recover.
     let identity = env.var("RESTATE_IDENTITY_KEY")?.to_string();
+    let agent = Agent::from_parts(accounts, config).into_service_definition();
+    #[cfg(feature = "acceptance-tests")]
+    let agent = agent.options(
+        restate_sdk::endpoint::ServiceOptions::default().handler(
+            "set_credit_entries",
+            restate_sdk::endpoint::HandlerOptions::default()
+                .retry_policy_initial_interval(std::time::Duration::from_millis(100))
+                .retry_policy_max_interval(std::time::Duration::from_millis(100))
+                .retry_policy_max_attempts(2),
+        ),
+    );
     let endpoint = restate_sdk::prelude::Endpoint::builder()
         .bind(order)
-        .bind(Agent::from_parts(accounts, config).experimental_request_response())
+        .bind(agent)
         .identity_key(&identity)
         .map_err(|_| invalid("invalid request identity key"))?
         .build();

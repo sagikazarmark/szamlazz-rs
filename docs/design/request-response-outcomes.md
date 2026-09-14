@@ -40,6 +40,28 @@ below.
 
 ## Admission and support
 
+### Agent credit-entry extension
+
+`Szamlazz.Agent.set_credit_entries` uses its existing shared implementation on
+native and Workers. Its run journals one exchange outcome without deliberate send
+retry or preceding query; an interrupted unrecorded run may still execute again.
+Additive replay can append twice, replacement replay can overwrite a newer external
+entry. These are accepted existing Agent semantics, not Order send protection.
+Completed successes/faults replay; lost answers, vendor refusals after interruption,
+contradictory reported identity and cancellation retain the existing uncertainty
+faults. Credential failures do not establish non-execution of an earlier run.
+There is no Order marker or worker-provided credit-entry recovery. The caller must
+settle the exact request and exclude delayed execution before deliberate renewal,
+then query and submit only remaining entries/current intended replacement.
+
+All Agent handlers now operate identically without an experimental selector. The
+test-util `Agent::experimental_request_response` method remains a no-op compatibility
+method; Order's opt-in still selects its replay-risk contract and blocks corrective
+issuance. The same credit-entry scenarios run on native buffered RequestResponse
+and signed/scoped workerd, including counted additive duplicates, replacement of a
+newer external entry, exact money, lost answers, cancellation, credential/refusal
+answers and completed replay.
+
 ### Storno extension (agreed)
 
 Order storno uses the same portable retained-write boundary. Unfinished replay
@@ -61,8 +83,8 @@ an exactly-once guarantee.
 Agent storno is enabled with its existing unmanaged query-first issue policy and
 no-Order guard, unchanged. It has no Order marker; its documented uncertainty and
 no-op acknowledgement policy remain distinct. Native and Workers run these same
-services with explicit experimental opt-in. Credits and corrective issuance remain
-outside the approved mutation subset.
+services. Credit entries use the existing Agent contract above; corrective issuance
+remains outside the approved Order mutation subset.
 
 ### Prepayment/final extension (agreed)
 
@@ -123,10 +145,10 @@ retain the marker. Known new contracts are recoverable; old or unknown prepare
 results never grant permission for the new operation. Other mutation types remain
 outside this extension.
 
-The explicit `test-util` opt-in on **both** Order and Agent is for an isolated
+The explicit `test-util` opt-in on Order is for an isolated
 experimental endpoint. It permits all four create handlers (proforma, ordinary,
 prepayment, final), exact-target `delete_proforma`, Order `storno_invoice` and unmanaged
-Agent `storno`, including supported reissue
+Agent `storno`/`set_credit_entries`, including supported reissue
 and pinned conversion, evidence-carrying `recover`, and reads (`get`,
 `observe_unresolved`, Agent `query`, `query_taxpayer`, `check_account`). All other
 mutations return the existing `invalid_input` fault before provider I/O.

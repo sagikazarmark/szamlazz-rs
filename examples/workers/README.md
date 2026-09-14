@@ -2,7 +2,7 @@
 
 An **experimental**, explicitly selected endpoint for proforma creation/deletion and ordinary/prepayment/final invoices (including
 exact-target reissue and pinned proforma conversion), Order/unmanaged Agent storno,
-reads and operator recovery.
+credit-entry registration, reads and operator recovery.
 It embeds the real services, including input/money validation, account
 resolution, fresh guards, unresolved markers and read-only reconciliation.
 It does not approve additional mutation types or production migration. The ingress
@@ -139,6 +139,10 @@ unsigned discovery refusal. The Rust test uses real Restate ingress to exercise:
   the final document becomes visible. The exact prepayment reference is retained.
 - Order storno open-run resubmission and recorded uncertainty with read-only
   reconciliation, plus the existing unmanaged Agent storno path.
+- The same credit-entry scenarios as native: additive duplication/replacement of
+  newer external entries after interruption, exact decimals, recorded outcomes,
+  lost answers, later refusal, credentials, mismatched identity and cancellation.
+  Agent uses its existing contract and does not introduce an Order marker.
 
 The native buffered suite additionally covers invisible first effects with/without
 fake deduplication and deliberately surviving old execution. Those remain accepted

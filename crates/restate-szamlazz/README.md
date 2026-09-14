@@ -26,11 +26,12 @@ are computed or validated against caller assertions, domain outcomes are returne
 ### Protection by operation
 
 An isolated **#247 RequestResponse experiment** is available behind `test-util`,
-explicitly selected on both services with `.experimental_request_response()`.
+explicitly selected on Order with `.experimental_request_response()`; Agent uses
+its normal shared implementation and needs no selector.
 It supports proforma creation and exact-target deletion, ordinary/prepayment/final
 invoices including exact-target reissue and pinned references, reads,
-Order storno and evidence-carrying recovery; Agent also permits its existing
-unmanaged storno handler. It requires operator-confirmed
+Order storno and evidence-carrying recovery; Agent permits all its existing handlers,
+including unmanaged storno and credit-entry registration. It requires operator-confirmed
 provider duplicate-order checking, and accepts unfinished-run resubmission risk.
 Proforma deletion clears automatically only on an acknowledged deletion; a later
 absence/refusal or failed guard retains uncertainty. Named deletion keeps its exact
@@ -41,6 +42,9 @@ RequestResponse Order storno retains the verified original's provider id, fulfil
 date and appearance. An interrupted open run refreshes that original before any
 resubmission; recorded uncertainty only reconciles. Agent storno keeps its distinct
 unmanaged query-first issue policy and no-Order guard.
+Agent credit entries retain their existing unkeyed additive/replacement replay risks
+and uncertainty faults, with no Order marker. `Agent::experimental_request_response`
+is now a no-op compatibility method; its handlers need no special selector.
 See the [actual-service experiment](tests/request_response/README.md) and
 [outcome/clearance table](../../docs/design/request-response-outcomes.md).
 The [workers-rs example](../../examples/workers/README.md) now exercises this slice

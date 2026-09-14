@@ -4,6 +4,8 @@
 mod chain;
 #[path = "../common/mod.rs"]
 mod common;
+#[path = "../common/credit_scenarios.rs"]
+mod credit_scenarios;
 mod extensions;
 mod proformas;
 mod storno;
@@ -213,7 +215,20 @@ fn endpoint(provider: &str, lab: Arc<Lab>, worker: usize) -> Endpoint {
                         .handler("delete_proforma", policy),
                 ),
         )
-        .bind(Agent::from_parts(accounts, config).experimental_request_response())
+        .bind(
+            Agent::from_parts(accounts, config)
+                .experimental_request_response()
+                .into_service_definition()
+                .options(
+                    ServiceOptions::default().handler(
+                        "set_credit_entries",
+                        HandlerOptions::default()
+                            .retry_policy_initial_interval(Duration::from_millis(100))
+                            .retry_policy_max_interval(Duration::from_millis(100))
+                            .retry_policy_max_attempts(2),
+                    ),
+                ),
+        )
         .build()
 }
 
@@ -363,22 +378,6 @@ async fn admission_cases(server: &Restate, mock: &wiremock::MockServer, lab: &Ar
                 .expect("fault")
                 .contains("mutation unsupported"),
             "must refuse at capability boundary: {handler}"
-        );
-    }
-    for handler in ["set_credit_entries"] {
-        let response = server
-            .invoke(
-                &Call::service("Szamlazz.Agent", handler),
-                Some(&json!({})),
-                None,
-            )
-            .await;
-        assert_eq!(response.status, 400, "{handler}: {response:?}");
-        assert!(
-            response.body["message"]
-                .as_str()
-                .expect("fault")
-                .contains("mutation unsupported")
         );
     }
     let mut invalid = request();
@@ -756,6 +755,10 @@ async fn e2e_request_response_actual_order() {
     proformas::create(&server, &mock).await;
     chain::issue(&server, &mock).await;
     storno::normal(&server, &mock).await;
+    credit_scenarios::run(&server, &mock, None, || async {
+        lab.cut.notify_one();
+    })
+    .await;
     storno::unmanaged(&server, &mock).await;
     storno::interrupted(&server, &mock, &lab).await;
     storno::recovery(&server, &mock).await;
