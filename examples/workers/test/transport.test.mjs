@@ -61,34 +61,12 @@ test("each exchange reauthenticates and never reuses response session cookies", 
   } finally {await mf.dispose();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 });
 
-test("provider exchanges must not follow redirects", async () => {
-  let redirected = 0;
-  const server = createServer((req,res) => {
-    req.resume();
-    if(req.url === "/redirected") { redirected++; res.writeHead(200,{szlahu_error_code:"7"}); res.end(); }
-    else { res.writeHead(307,{location:`http://127.0.0.1:${server.address().port}/redirected`}); res.end(); }
-  });
-  await new Promise(resolve => server.listen(0,"127.0.0.1",resolve));
-  const mf = new Miniflare({ modules:true, modulesRules:[{type:"CompiledWasm",include:["**/*.wasm"]}],
-    scriptPath:"build/worker/shim.mjs", compatibilityDate:"2026-07-30",
-    bindings:{SZAMLAZZ_ACCOUNTS:JSON.stringify({account:{id:"test",agent_key:"NOT-A-REAL-KEY",endpoint:`http://127.0.0.1:${server.address().port}/redirect`}})},
-  });
-  try {
-    const response = await mf.dispatchFetch("http://localhost/transport-probe");
-    assert.equal(response.status,200,await response.clone().text());
-    assert.equal(redirected,0,"credential-bearing POST must never reach the redirect destination");
-    assert.deepEqual((await response.json()).accepted,[false]);
-  } finally { await mf.dispose(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
-});
-
-test("ambiguous repeated protocol headers cannot become acceptance or identity", async () => {
-  // The ordinary parser would accept the code7 miss despite these other
-  // headers; only the Fetch ambiguity guard prevents acceptance here.
-  const server=createServer((req,res)=>{req.resume();res.writeHead(200,{szlahu_error_code:"7",szlahu_szamlaszam:["A-1","B-2"]});res.end();});
+test("comma-containing metadata does not override the shared parser's verdict", async () => {
+  const server=createServer((req,res)=>{req.resume();res.writeHead(200,{szlahu_error_code:"7",szlahu_brutto:"1270,00"});res.end();});
   await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
   const mf=new Miniflare({modules:true,modulesRules:[{type:"CompiledWasm",include:["**/*.wasm"]}],scriptPath:"build/worker/shim.mjs",compatibilityDate:"2026-07-30",
     bindings:{SZAMLAZZ_ACCOUNTS:JSON.stringify({account:{id:"test",agent_key:"NOT-A-REAL-KEY",endpoint:`http://127.0.0.1:${server.address().port}/headers`}})}});
-  try {const response=await mf.dispatchFetch("http://localhost/transport-probe");assert.deepEqual((await response.json()).accepted,[false]);}
+  try {const response=await mf.dispatchFetch("http://localhost/transport-probe");assert.deepEqual((await response.json()).accepted,[true]);}
   finally {await mf.dispose();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 });
 

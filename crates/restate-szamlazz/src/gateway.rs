@@ -96,8 +96,8 @@ use szamlazz_agent::ops::proforma::{DeleteProforma, ProformaSelector};
 use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
 use szamlazz_agent::ops::taxpayer::{QueryTaxpayer, TaxpayerPrefix};
 use szamlazz_agent::{
-    ApiError, Client, Credentials, Date, ErrorCode, InvoiceNumber, InvoiceSelector, OutcomeClass,
-    reqwest,
+    ApiError, Client, ClientError, Credentials, Date, ErrorCode, InvoiceNumber, InvoiceSelector,
+    OutcomeClass, reqwest,
 };
 use tracing::Instrument as _;
 
@@ -107,8 +107,6 @@ use crate::identity::{ExternalId, OrderKey};
 
 pub mod build;
 mod diagnostic;
-mod transport;
-use transport::ClientError;
 pub mod document;
 pub mod recovery;
 
@@ -293,7 +291,7 @@ impl<'de> Deserialize<'de> for RejectionCode {
 /// in an `Arc` for the execution.
 #[derive(Debug)]
 pub struct Gateway {
-    client: transport::Client,
+    client: Client,
     account: Account,
 }
 
@@ -1186,15 +1184,19 @@ impl Gateway {
     ///
     /// Returns an error when the HTTP client cannot be constructed.
     ///
-    /// On `wasm32`, uses a Fetch exchange with manual redirects and a deadline
-    /// covering the full body. No session cookies are persisted: each XML request
-    /// reauthenticates. JS futures are confined to the executing host thread.
+    /// On `wasm32`, uses the same Számla Agent client with reqwest's WASM
+    /// backend and request-level deadline. Workers does not persist session
+    /// cookies, so each XML request reauthenticates. Reqwest's default Fetch
+    /// redirect/header behavior is accepted for the non-redirecting vendor endpoint.
     /// Actual-service Workers support is currently the explicit #247 experiment;
     /// see `examples/workers` in the repository for its pinned SDK prerequisite.
     pub fn open(account: Account, credentials: Credentials) -> Result<Self, BuildError> {
         #[cfg(target_arch = "wasm32")]
         {
-            let client = transport::Client::new(account.endpoint.as_str().to_owned(), credentials);
+            let client = Client::builder()
+                .credentials(credentials)
+                .endpoint(account.endpoint.as_str())
+                .build()?;
             Ok(Self { client, account })
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -1221,13 +1223,16 @@ impl Gateway {
     /// no transport injection hook. The Számla Agent crate's
     /// [`ClientBuilder::http_client`](szamlazz_agent::client::ClientBuilder::http_client)
     /// is the same hook one level down, and what the default client sets is
-    /// then the caller's to set: `.cookie_store(true)` so the `JSESSIONID`
+    /// then the native caller's to set: `.cookie_store(true)` so the `JSESSIONID`
     /// session is reused, a timeout (the default client's
     /// [`REQUEST_TIMEOUT`](szamlazz_agent::client::REQUEST_TIMEOUT) is not
-    /// applied to a supplied client), and `redirect(Policy::none())`, since
+    /// applied to a supplied native client), and `redirect(Policy::none())`, since
     /// redirects can change the method or forward its credential-bearing body.
     /// Disable transport retries with `.retry(reqwest::retry::never())` as well:
     /// one send permission must not become several possibly effective exchanges.
+    /// On WASM those native builder settings are unavailable: the shared Számla
+    /// Agent client applies `REQUEST_TIMEOUT` per request even with a supplied
+    /// client, and reqwest's Fetch redirect/header behavior is retained.
     ///
     /// The fresh-client-per-execution boundary of [`Gateway::open`] becomes
     /// the caller's to keep: two gateways of two accounts opened over one
@@ -1253,9 +1258,23 @@ impl Gateway {
             .endpoint(account.endpoint.as_str())
             .http_client(http)
             .build()?;
-        #[cfg(target_arch = "wasm32")]
-        let client = client.into();
         Ok(Self { client, account })
+    }
+
+    /// Only adapt the JS future's thread affinity to Restate's Send bound.
+    /// All HTTP execution and response interpretation belong to szamlazz-agent.
+    async fn send<R: szamlazz_agent::wire::AgentRequest>(
+        &self,
+        request: &R,
+    ) -> Result<R::Response, ClientError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            send_wrapper::SendWrapper::new(self.client.send(request)).await
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.client.send(request).await
+        }
     }
 
     /// The account the gateway speaks for: the only way the services read
@@ -1502,7 +1521,7 @@ impl Gateway {
         retain_positive_duplicate: bool,
     ) -> Result<CreateOutcome, Unconfirmed> {
         // Step 2: create.
-        match self.client.send(request.create).await {
+        match self.send(request.create).await {
             Ok(CreationOutcome::Issued(created)) => {
                 if request.reversed == Some(created.invoice_number.as_str()) {
                     let open = Unconfirmed::ReissueEcho;
@@ -1928,7 +1947,7 @@ impl Gateway {
     ) -> Result<TaxpayerOutcome, Unanswered> {
         let span = tracing::info_span!("gateway.query_taxpayer", prefix = %prefix.as_str());
         let request = QueryTaxpayer::from(prefix.clone());
-        match self.client.send(&request).instrument(span).await {
+        match self.send(&request).instrument(span).await {
             Ok(info) => {
                 let taxpayer = QueryTaxpayerResponse::try_from(info)
                     .map_err(|error| Unanswered::Transport(error.to_string()))?;
@@ -2084,7 +2103,7 @@ impl Gateway {
         // Step 2: send.
         let storno = self.account.build_storno(request);
 
-        match self.client.send(&storno).await {
+        match self.send(&storno).await {
             Ok(response) => {
                 let Ok(created) = response.into_numbered() else {
                     // Acknowledgement metadata is not document evidence and
@@ -2377,7 +2396,7 @@ impl Gateway {
         }
         let request =
             DeleteProforma::new(ProformaSelector::InvoiceNumber(InvoiceNumber::new(number)));
-        match self.client.send(&request).await {
+        match self.send(&request).await {
             Ok(()) => {
                 tracing::info!(number = %number, "proforma deleted");
                 DeleteOutcome::Deleted
@@ -2419,7 +2438,7 @@ impl Gateway {
             .aggregator
             .clone_from(&self.account.defaults.aggregator);
 
-        match self.client.send(&request).await {
+        match self.send(&request).await {
             Ok(result)
                 if result
                     .invoice_number
@@ -2465,7 +2484,7 @@ impl Gateway {
         project: impl FnOnce(szamlazz_agent::ops::query_xml::InvoiceDocument) -> T,
     ) -> Result<T, QueryError> {
         let request = QueryInvoiceXml::new(selector);
-        match self.client.send(&request).await {
+        match self.send(&request).await {
             Ok(document) => {
                 let expected = match &request.selector {
                     InvoiceSelector::InvoiceNumber(number) => Some(number.as_str()),

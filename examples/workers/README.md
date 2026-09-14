@@ -69,36 +69,30 @@ dependency; `rand`, `uuid`, `tracing-span-filter`, `rust_crypto` remain enabled.
 uses the Rust crypto backend. Runtime-independent Tokio utilities and task-local
 spans remain; Tokio socket/signal features are absent from this WASM build.
 
-## Why Fetch instead of reqwest for the default WASM Gateway?
+## One Számla Agent client, reqwest on both hosts
 
-We first built actual Order/Agent with reqwest's WASM backend. A workerd regression
-test observed its `307` forwarding the credential-bearing POST to the redirect
-destination. Reqwest 0.13.5 does not expose a WASM redirect-policy setter. Therefore
-only the default WASM exchange uses a small Fetch adapter at the existing
-`AgentRequest::to_wire` / `parse(RawResponse)` seam. Native Gateway remains reqwest.
-Direct `Gateway::open_with_http` still accepts a supplied reqwest client; that
-expert hook retains caller-owned transport policy and is not used by this endpoint.
+Order/Agent use `szamlazz_agent::Client` on native and Workers. Reqwest selects its
+native or WASM/Fetch backend. There is no worker-owned HTTP implementation or error
+model. `Gateway::send` only wraps the client future with thread-checking
+`SendWrapper` on WASM to satisfy Restate's Send bound; native bounds remain intact.
 
-The default WASM exchange:
+`szamlazz-agent` applies the shared `REQUEST_TIMEOUT` (60 seconds) to each WASM
+request. Reqwest retains its abort guard through **full body** consumption; runtime
+tests cover both deadline expiry and dropping a pending exchange. Incomplete bodies
+remain client errors, never fabricated complete responses.
 
-- Makes one POST with `redirect: manual`; never follows a redirect or retries.
-- Uses an AbortController and the shared `REQUEST_TIMEOUT` (60 seconds) covering
-  headers **and full body**. Dropping the exchange aborts it; provider effects may
-  already exist. Incomplete bodies never become successful parsed responses.
-- Passes Fetch's header entries to the shared parser. **Approved experimental
-  restriction:** Fetch combines repeated non-cookie headers. Any `szlahu_*` value
-  containing a literal comma is therefore refused as an inconclusive exchange,
-  before it could manufacture a combined document number or verdict. This also
-  refuses legitimate literal-comma headers, including comma-decimal fallback
-  metadata. URL-encoded `%2C` is decoded only later by the shared parser. Native
-  first-header behavior cannot be reproduced losslessly through Fetch.
-- Deliberately persists **no session cookie**. Every XML exchange includes its
-  resolved credentials. No ambient browser jar, cross-account cookie reuse, or
-  reconstruction of cookies from comma-joined headers is assumed. The fake provider
-  checks two exchanges per execution and separate credentials without Cookie headers;
-  actual vendor session behavior remains the documented reauthentication premise.
-- Adapts JS futures with thread-checking `SendWrapper` locally. No JS future or
-  response escapes the host exchange; native Send bounds remain unchanged.
+Reqwest's default WASM redirect/header behavior is accepted for szamlazz.hu's
+non-redirecting endpoint. The prior injected-307 experiment demonstrated behavior
+on a fake redirect, not a vendor problem; it does not justify a second transport.
+The separate Fetch exchange and its blanket comma-header refusal have been removed.
+Header interpretation belongs solely to the shared client/parser, using the values
+reqwest supplies (Fetch may combine repeated non-cookie headers). Native redirect
+configuration remains unchanged.
+
+Workers persists no session cookies through reqwest's WASM backend. Every XML
+request includes its resolved credentials. The fake-provider suite checks two
+exchanges per execution and separate account credentials without Cookie headers;
+actual vendor behavior remains the documented reauthentication premise.
 
 Execution timers: resolver/store calls keep their ten-second deadline; credential
 fetch retries keep their 200 ms sleep. WASM uses JS timers, native uses Tokio.
@@ -120,7 +114,7 @@ mock-only policies/control sources. The ordinary example build has none of these
 All test servers and control endpoints bind to loopback. Test identity keys are
 generated per run and removed on normal shutdown.
 
-`npm test` runs workerd checks for redirects, stalled complete-body deadline,
+`npm test` runs workerd checks for shared comma-metadata interpretation, stalled complete-body deadline,
 transfer abortion, explicit credential resubmission/no cookie persistence, and
 unsigned discovery refusal. The Rust test uses real Restate ingress to exercise:
 

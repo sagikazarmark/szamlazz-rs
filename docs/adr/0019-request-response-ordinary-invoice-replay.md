@@ -161,16 +161,16 @@ scoped issuance, open-execution replacement, retained uncertainty, pause/resume,
 active cancellation and kill are exercised through real Restate. This does not
 approve the remaining production capability/settlement/migration gates.
 
-Reqwest's WASM backend was tried first; a workerd test observed a `307` forwarding
-the credential-bearing POST. Its absent redirect-policy control requires a small
-Fetch exchange for the default WASM Gateway. Native reqwest and shared operation
-serialization/parsing remain. Fetch uses manual redirects, a full-response deadline,
-drop-triggered abortion and explicit no-session persistence (XML reauthentication).
+**Transport correction, user decision:** use `szamlazz-agent` with reqwest on both
+native and Cloudflare. The injected `307` test demonstrated reqwest's default WASM
+redirect behavior, not a redirect from szamlazz.hu. The user confirmed the vendor
+does not return redirects; that synthetic case is not a reason for a separate HTTP
+implementation. This supersedes the initial private Fetch implementation and its
+comma-header refusal, both removed. Reqwest's WASM redirect/header behavior is
+accepted on this endpoint; shared parsing owns header interpretation.
 
-**Accepted experimental restriction, user decision:** Fetch combines repeated
-non-cookie headers irreversibly. Refuse every literal-comma `szlahu_*` value as an
-inconclusive exchange before parsing. This also refuses legitimate comma-containing
-header values, including comma-decimal fallback metadata; it does not manufacture
-combined document identities. Native first-header semantics remain unchanged.
-The runtime tests establish fake-provider behavior; provider reauthentication rests
-on the documented no-session premise, not a new live-account observation.
+The Számla Agent client's WASM request-level timeout covers the full response and
+reqwest aborts dropped exchanges. Workers uses XML reauthentication without session
+persistence. The worker keeps only the JS-future affinity adapter, execution timers
+and SDK hosting concerns. Native reqwest configuration is unchanged. Runtime tests
+establish fake-provider behavior, not a new live-account reauthentication observation.

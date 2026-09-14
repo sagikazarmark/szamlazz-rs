@@ -154,7 +154,7 @@ type Ci {
   }
 
   """
-  Actual Rust Order/Agent in workerd: release bundle, Fetch transport checks,
+  Actual Rust Order/Agent in workerd: release bundle, reqwest transport checks,
   signed/scoped Restate execution and retained uncertainty across replacement.
   The example owns its pinned interim SDK override; native CI keeps crates.io.
   """

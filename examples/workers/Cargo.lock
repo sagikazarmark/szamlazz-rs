@@ -1877,7 +1877,6 @@ dependencies = [
  "gloo-timers",
  "http",
  "jiff",
- "js-sys",
  "restate-sdk",
  "rust_decimal",
  "send_wrapper",
@@ -1889,9 +1888,6 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]
