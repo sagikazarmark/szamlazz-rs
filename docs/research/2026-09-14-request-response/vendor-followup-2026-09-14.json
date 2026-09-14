@@ -1,0 +1,92 @@
+[
+  {
+    "elapsed_ms": 27,
+    "event": "sending",
+    "label": "follow-up",
+    "request_bytes": 444
+  },
+  {
+    "body_bytes": 3174,
+    "elapsed_ms": 639,
+    "event": "received",
+    "http_status": 200,
+    "label": "follow-up",
+    "reported_code": null,
+    "reported_id": "930038520",
+    "reported_number": "CTEST-2026-30"
+  },
+  {
+    "base": null,
+    "document_type": "SZ",
+    "elapsed_ms": 641,
+    "event": "document",
+    "gross": "1270",
+    "id": 930038520,
+    "label": "follow-up",
+    "net": "1000",
+    "number": "CTEST-2026-30",
+    "order": "vb-61e35a2ff49343629c06e98ae112e7bb",
+    "reversed": null,
+    "test": true
+  },
+  {
+    "elapsed_ms": 641,
+    "event": "sending",
+    "label": "follow-up",
+    "request_bytes": 444
+  },
+  {
+    "body_bytes": 3227,
+    "elapsed_ms": 754,
+    "event": "received",
+    "http_status": 200,
+    "label": "follow-up",
+    "reported_code": null,
+    "reported_id": "930038529",
+    "reported_number": "CTEST-2026-31"
+  },
+  {
+    "base": "CTEST-2026-30",
+    "document_type": "HS",
+    "elapsed_ms": 756,
+    "event": "document",
+    "gross": "1270",
+    "id": 930038529,
+    "label": "follow-up",
+    "net": "1000",
+    "number": "CTEST-2026-31",
+    "order": "vb-61e35a2ff49343629c06e98ae112e7bb",
+    "reversed": null,
+    "test": true
+  },
+  {
+    "elapsed_ms": 757,
+    "event": "sending",
+    "label": "follow-up",
+    "request_bytes": 444
+  },
+  {
+    "body_bytes": 3227,
+    "elapsed_ms": 859,
+    "event": "received",
+    "http_status": 200,
+    "label": "follow-up",
+    "reported_code": null,
+    "reported_id": "930038532",
+    "reported_number": "CTEST-2026-32"
+  },
+  {
+    "base": "CTEST-2026-30",
+    "document_type": "HS",
+    "elapsed_ms": 860,
+    "event": "document",
+    "gross": "1270",
+    "id": 930038532,
+    "label": "follow-up",
+    "net": "1000",
+    "number": "CTEST-2026-32",
+    "order": "vb-61e35a2ff49343629c06e98ae112e7bb",
+    "reversed": null,
+    "test": true
+  }
+]

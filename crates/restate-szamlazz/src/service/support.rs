@@ -79,6 +79,7 @@ mod journaled {
     journaled!(
         (),
         crate::contract::recovery::UnresolvedWrite,
+        crate::service::recovery::ReplayIntent,
         crate::contract::recovery::RecoveryResponse,
         crate::gateway::recovery::WriteResult,
         Namespace,

@@ -196,10 +196,12 @@ impl ClientBuilder {
     /// or supply `.cookie_provider(Arc<Jar>)` so the
     /// `JSESSIONID` session cookie is reused and consecutive requests skip
     /// re-authentication; without it every request logs in again.
-    /// The supplied client owns all transport settings. Its retry policy
+    /// On native targets the supplied client owns all transport settings. Its retry policy
     /// also remains active: one [`Client::send`]
     /// may submit several POSTs without application-level reconciliation.
     /// Configure retries, deadlines and redirects for the operations you send.
+    /// On wasm, [`Client::send`] applies [`REQUEST_TIMEOUT`] per request, including
+    /// with a supplied client; other behavior is reqwest's WASM/Fetch backend's.
     /// Reuse the jar within
     /// one account, never across independently authenticated accounts. Cloning
     /// a reqwest client shares its jar; a new client over the same provider
@@ -278,7 +280,7 @@ pub enum BuildError {
 }
 
 /// How long the default HTTP client waits for one request before giving up
-/// (native targets; on wasm the runtime owns timeouts).
+/// (native client default; on wasm applied per request through reqwest).
 ///
 /// The detailed account record reports a ≥57-second stalled create with no
 /// issuance found; the broader delayed-issuance assertion has unresolved
@@ -287,7 +289,8 @@ pub enum BuildError {
 /// plus a margin before considering another send, and reconcile identity;
 /// an immediate empty query alone is insufficient. Exported so a delay floor
 /// can be derived rather than copied. A client built with
-/// [`ClientBuilder::http_client`] carries its own timeout instead.
+/// [`ClientBuilder::http_client`] carries its own timeout on native targets;
+/// on wasm [`Client::send`] applies this deadline even with a supplied client.
 pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(1);
 
 /// On native targets the client keeps the `JSESSIONID` session cookie via
@@ -374,13 +377,16 @@ impl Client {
     pub async fn send<R: AgentRequest>(&self, request: &R) -> Result<R::Response, ClientError> {
         let wire = request.to_wire(&self.credentials)?;
 
-        let response = self
+        let request_builder = self
             .http
             .post(self.endpoint.clone())
             .header(reqwest::header::CONTENT_TYPE, wire.content_type)
-            .body(wire.body)
-            .send()
-            .await?;
+            .body(wire.body);
+        // The WASM ClientBuilder has no timeout setting. Reqwest's per-request
+        // AbortGuard remains with the response through body consumption.
+        #[cfg(target_arch = "wasm32")]
+        let request_builder = request_builder.timeout(REQUEST_TIMEOUT);
+        let response = request_builder.send().await?;
 
         let status = response.status().as_u16();
         let headers = response.headers().clone();

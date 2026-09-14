@@ -9,6 +9,7 @@
 //!
 //! ```toml
 //! namespace = "acct"            # the external-id prefix; permanent
+//! order_execution = "protected" # or "replay_enabled"; explicit on either host
 //!
 //! [issue]                       # the run retry policy of Szamlazz.Agent.storno
 //! max_attempts = 5
@@ -82,12 +83,36 @@ use crate::identity::Namespace;
 
 use table::Table;
 
+/// Order write-execution semantics, selected explicitly on either host.
+/// Changing this setting requires a new immutable deployment and reviewed
+/// transition; it must never change the meaning of a retained invocation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderExecution {
+    /// Existing acknowledged execution-local permission. Supports all Order
+    /// mutations; requires bidirectional execution for normal write progress.
+    #[default]
+    Protected,
+    /// RequestResponse-compatible writes with fresh checks before unfinished-run
+    /// resubmission. Requires provider per-type duplicate-order checking and
+    /// accepts duplicate/delayed-effect risk. Recorded uncertainty stays read-only.
+    /// Corrective issuance is refused before provider I/O; it lacks deduplication.
+    ReplayEnabled,
+}
+
+impl OrderExecution {
+    pub(crate) const fn permits_replay(self) -> bool {
+        matches!(self, Self::ReplayEnabled)
+    }
+}
+
 /// The deployment-level settings the Restate services hold: what is not
 /// account-shaped and therefore does not route through the gateway.
 ///
 /// The namespace prefixes every external id the deployment issues; the issue
-/// policy is the run retry policy of `Szamlazz.Agent.storno`; protected Order
-/// writes send at most once and reconcile under their handler invocation policy.
+/// policy is the run retry policy of `Szamlazz.Agent.storno`. [`Self::order_execution`]
+/// selects protected one-permission execution or fresh-check unfinished-run replay;
+/// both retain recorded uncertainty for read-only reconciliation.
 /// Exclusive Order account resolution, required prerequisite reads and retained
 /// reconciliation use invocation retry/pause without a bounded run policy. The read
 /// policy governs shared/Agent ordinary reads, operator document verification and
@@ -101,6 +126,10 @@ use table::Table;
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerConfig {
+    /// Order execution contract. Defaults to [`OrderExecution::Protected`].
+    /// Agent behavior is independent of this setting.
+    #[serde(default)]
+    pub order_execution: OrderExecution,
     /// The external-id prefix of this deployment (`{namespace}:{order}:{kind}`).
     pub namespace: Namespace,
     /// The run retry policy of `Szamlazz.Agent.storno`, not protected Order writes.
@@ -128,6 +157,7 @@ impl WorkerConfig {
     #[must_use]
     pub fn new(namespace: Namespace) -> Self {
         Self {
+            order_execution: OrderExecution::Protected,
             namespace,
             issue: IssueConfig::default(),
             read: ReadConfig::default(),

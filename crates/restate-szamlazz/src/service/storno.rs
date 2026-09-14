@@ -585,6 +585,17 @@ impl Execution {
         let operation = crate::contract::recovery::WriteOperation::Storno {
             number: number.clone(),
         };
+        if self.config.order_execution.permits_replay() {
+            let result = self
+                .storno_replay_enabled(ctx, &order, intent.as_step_request(), &found)
+                .await?;
+            let crate::gateway::recovery::WriteResult::Storno(outcome) = result else {
+                return Err(Fault::outcome_unknown("unexpected recovery operation").into());
+            };
+            return storno_response(outcome, number, namespace)
+                .map(|response| response.with_invoice_document_id(found.document_id))
+                .map_err(|fault| about(fault).into());
+        }
         let result = self
             .protected_write(
                 ctx,

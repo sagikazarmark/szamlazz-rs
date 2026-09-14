@@ -33,9 +33,13 @@ pub(super) fn exchange(operation: &str, error: &ClientError) -> Unanswered {
             _ => "parse: unclassified failure",
         },
         ClientError::Transport(transport) => {
+            #[cfg(not(target_arch = "wasm32"))]
+            let connection = transport.is_connect();
+            #[cfg(target_arch = "wasm32")]
+            let connection = false;
             let category = if transport.is_timeout() {
                 "timeout"
-            } else if transport.is_connect() {
+            } else if connection {
                 "connection"
             } else if transport.is_redirect() {
                 "redirect"

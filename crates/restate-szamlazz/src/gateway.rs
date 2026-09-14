@@ -422,6 +422,43 @@ pub enum CreateStepRequestError {
 }
 
 impl<'a> CreateStepRequest<'a> {
+    pub(crate) fn external_id(&self) -> &'a ExternalId {
+        self.external_id
+    }
+
+    pub(crate) fn order(&self) -> &'a OrderKey {
+        self.order
+    }
+
+    pub(crate) fn replay_contract(
+        &self,
+    ) -> Option<crate::contract::recovery::ReplayExecutionContract> {
+        use crate::contract::recovery::ReplayExecutionContract as Contract;
+        match self.kind {
+            IssuedKind::Invoice => Some(Contract::RequestResponseOrdinaryV1),
+            IssuedKind::Proforma => Some(Contract::RequestResponseProformaV1),
+            IssuedKind::Prepayment => Some(Contract::RequestResponsePrepaymentV1),
+            IssuedKind::Final => Some(Contract::RequestResponseFinalV1),
+            IssuedKind::Corrective => None,
+        }
+    }
+
+    pub(crate) fn prepayment_number(&self) -> Option<&str> {
+        match &self.create.kind {
+            szamlazz_agent::ops::invoice::InvoiceKind::Final {
+                prepayment_number, ..
+            } => prepayment_number
+                .as_ref()
+                .map(szamlazz_agent::InvoiceNumber::as_str),
+            _ => None,
+        }
+    }
+    pub(crate) fn proforma_number(&self) -> Option<&str> {
+        self.create
+            .kind
+            .proforma_number()
+            .map(szamlazz_agent::InvoiceNumber::as_str)
+    }
     /// Check the outbound request against the identity to look up and retain.
     /// `corrected_number` must name the intended base for a corrective and be
     /// `None` otherwise. Comparisons do not trim or normalize either side.
@@ -505,6 +542,18 @@ impl<'a> CreateStepRequest<'a> {
 #[must_use]
 pub struct CreatePermission {
     _private: (),
+}
+
+/// Where an uncertain create is reconciled and which duplicate evidence survives
+/// the send. These policies describe settlement, not permission to submit.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CreateSettlement {
+    /// Direct Gateway callers receive an immediate intent-aware reconciliation.
+    Immediate,
+    /// Protected Order records uncertainty before its read-only reconciliation.
+    Retained,
+    /// Replay-enabled Order also preserves positive evidence from a duplicate reply.
+    RetainedWithDuplicateEvidence,
 }
 
 impl CreatePermission {
@@ -1183,19 +1232,37 @@ impl Gateway {
     /// # Errors
     ///
     /// Returns an error when the HTTP client cannot be constructed.
+    ///
+    /// On `wasm32`, uses the same Számla Agent client with reqwest's WASM
+    /// backend and request-level deadline. Workers does not persist session
+    /// cookies, so each XML request reauthenticates. Reqwest's default Fetch
+    /// redirect/header behavior is accepted for the non-redirecting vendor endpoint.
+    /// Actual-service Workers support is currently the explicit #247 experiment;
+    /// see `examples/workers` in the repository for its pinned SDK prerequisite.
     pub fn open(account: Account, credentials: Credentials) -> Result<Self, BuildError> {
-        let http = reqwest::Client::builder()
-            .cookie_store(true)
-            .timeout(szamlazz_agent::client::REQUEST_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .build()?;
-        let client = Client::builder()
-            .credentials(credentials)
-            .endpoint(account.endpoint.as_str())
-            .http_client(http)
-            .build()?;
-        Ok(Self { client, account })
+        #[cfg(target_arch = "wasm32")]
+        {
+            let client = Client::builder()
+                .credentials(credentials)
+                .endpoint(account.endpoint.as_str())
+                .build()?;
+            Ok(Self { client, account })
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let http = reqwest::Client::builder()
+                .cookie_store(true)
+                .timeout(szamlazz_agent::client::REQUEST_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .build()?;
+            let client = Client::builder()
+                .credentials(credentials)
+                .endpoint(account.endpoint.as_str())
+                .http_client(http)
+                .build()?;
+            Ok(Self { client, account })
+        }
     }
 
     /// Opens the gateway as [`Gateway::open`] does, over the caller's own
@@ -1205,13 +1272,16 @@ impl Gateway {
     /// no transport injection hook. The Számla Agent crate's
     /// [`ClientBuilder::http_client`](szamlazz_agent::client::ClientBuilder::http_client)
     /// is the same hook one level down, and what the default client sets is
-    /// then the caller's to set: `.cookie_store(true)` so the `JSESSIONID`
+    /// then the native caller's to set: `.cookie_store(true)` so the `JSESSIONID`
     /// session is reused, a timeout (the default client's
     /// [`REQUEST_TIMEOUT`](szamlazz_agent::client::REQUEST_TIMEOUT) is not
-    /// applied to a supplied client), and `redirect(Policy::none())`, since
+    /// applied to a supplied native client), and `redirect(Policy::none())`, since
     /// redirects can change the method or forward its credential-bearing body.
     /// Disable transport retries with `.retry(reqwest::retry::never())` as well:
     /// one send permission must not become several possibly effective exchanges.
+    /// On WASM those native builder settings are unavailable: the shared Számla
+    /// Agent client applies `REQUEST_TIMEOUT` per request even with a supplied
+    /// client, and reqwest's Fetch redirect/header behavior is retained.
     ///
     /// The fresh-client-per-execution boundary of [`Gateway::open`] becomes
     /// the caller's to keep: two gateways of two accounts opened over one
@@ -1238,6 +1308,22 @@ impl Gateway {
             .http_client(http)
             .build()?;
         Ok(Self { client, account })
+    }
+
+    /// Only adapt the JS future's thread affinity to Restate's Send bound.
+    /// All HTTP execution and response interpretation belong to szamlazz-agent.
+    async fn send<R: szamlazz_agent::wire::AgentRequest>(
+        &self,
+        request: &R,
+    ) -> Result<R::Response, ClientError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            send_wrapper::SendWrapper::new(self.client.send(request)).await
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.client.send(request).await
+        }
     }
 
     /// The account the gateway speaks for: the only way the services read
@@ -1273,10 +1359,22 @@ impl Gateway {
             external_id = %request.external_id,
             kind = %request.kind,
         );
-        self.lookup_inner(&request).instrument(span).await
+        self.lookup_inner(&request, false).instrument(span).await
     }
 
-    async fn lookup_inner(&self, request: &LookupRequest<'_>) -> Result<LookupOutcome, Unanswered> {
+    /// Replay-enabled admission also blocks an unselected live proforma in the hint.
+    pub(crate) async fn lookup_for_replay(
+        &self,
+        request: LookupRequest<'_>,
+    ) -> Result<LookupOutcome, Unanswered> {
+        self.lookup_inner(&request, true).await
+    }
+
+    async fn lookup_inner(
+        &self,
+        request: &LookupRequest<'_>,
+        block_proforma: bool,
+    ) -> Result<LookupOutcome, Unanswered> {
         // Step 1: the external id.
         let reversed = match self
             .seen(request.external_id, request.order, request.kind)
@@ -1306,7 +1404,12 @@ impl Gateway {
             match self.hint_raw(request.order).await {
                 Ok(hint) => {
                     let seen = reversed.as_deref().map(|found| found.number.as_str());
-                    if is_foreign(&hint, request.our_numbers, seen) {
+                    if is_foreign(&hint, request.our_numbers, seen)
+                        || (block_proforma
+                            && hint.is_live()
+                            && !request.our_numbers.contains(&hint.number)
+                            && hint.document_type == szamlazz_agent::DocumentType::Proforma)
+                    {
                         tracing::warn!(
                             number = %hint.number,
                             tipus = %hint.document_type,
@@ -1449,24 +1552,22 @@ impl Gateway {
             Err(QueryError::Transport(message)) => return Err(Unconfirmed::Transport(message)),
         }
 
-        self.create_send(request, false).await
+        self.create_send(request, CreateSettlement::Immediate).await
     }
 
     async fn create_send(
         &self,
         request: &CreateStepRequest<'_>,
-        protected: bool,
+        settlement: CreateSettlement,
     ) -> Result<CreateOutcome, Unconfirmed> {
         // Step 2: create.
-        match self.client.send(request.create).await {
+        match self.send(request.create).await {
             Ok(CreationOutcome::Issued(created)) => {
                 if request.reversed == Some(created.invoice_number.as_str()) {
                     let open = Unconfirmed::ReissueEcho;
-                    return if protected {
-                        Err(open)
-                    } else {
-                        self.settle_or(request, open).await
-                    };
+                    return self
+                        .settle_unconfirmed_create(request, settlement, open)
+                        .await;
                 }
                 let issued = IssuedDocument::from(created);
                 tracing::info!(number = %issued.number, "document issued");
@@ -1474,17 +1575,14 @@ impl Gateway {
             }
             // A success without a document number (a preview, which the
             // worker never asks for, or an arm the agent crate adds later):
-            // nothing the step can name, so it re-queries.
+            // nothing the step can name; the settlement policy decides when to reconcile.
             Ok(_) => {
                 let open = Unconfirmed::Open {
                     code: None,
                     message: "the create succeeded without a document number".to_owned(),
                 };
-                if protected {
-                    Err(open)
-                } else {
-                    self.settle_or(request, open).await
-                }
+                self.settle_unconfirmed_create(request, settlement, open)
+                    .await
             }
             Err(error) => match classify_failure("create", error) {
                 Failure::Rejected(rejection) => {
@@ -1495,43 +1593,66 @@ impl Gateway {
                     Ok(CreateOutcome::CredentialsRejected(answer))
                 }
                 Failure::Unknown(answer) => {
-                    tracing::warn!(code = %answer.code, "open code; re-querying");
+                    tracing::warn!(code = %answer.code, "create returned an open code");
                     let open = Unconfirmed::Open {
                         code: Some(answer.code),
                         message: answer.message,
                     };
-                    if protected {
-                        Err(open)
-                    } else {
-                        self.settle_or(request, open).await
-                    }
+                    self.settle_unconfirmed_create(request, settlement, open)
+                        .await
                 }
                 Failure::Unavailable(message) => {
-                    if protected {
-                        return Err(Unconfirmed::Unavailable(message));
+                    if settlement == CreateSettlement::Immediate {
+                        tracing::warn!("szlahu_down on the create; re-querying");
                     }
-                    tracing::warn!("szlahu_down on the create; re-querying");
-                    self.settle_or(request, Unconfirmed::Unavailable(message))
-                        .await
+                    self.settle_unconfirmed_create(
+                        request,
+                        settlement,
+                        Unconfirmed::Unavailable(message),
+                    )
+                    .await
                 }
                 Failure::Transport(message) => {
-                    if protected {
-                        return Err(Unconfirmed::Transport(message));
+                    if settlement == CreateSettlement::Immediate {
+                        tracing::warn!("transport failure; re-querying");
                     }
-                    tracing::warn!("transport failure; re-querying");
-                    self.settle_or(request, Unconfirmed::Transport(message))
-                        .await
+                    self.settle_unconfirmed_create(
+                        request,
+                        settlement,
+                        Unconfirmed::Transport(message),
+                    )
+                    .await
                 }
                 Failure::Duplicate(answer) => {
                     tracing::info!(code = %answer.code, "duplicate order number; re-querying");
                     let diagnostic = self.after_duplicate(request, answer.clone()).await;
                     Ok(match diagnostic {
+                        outcome @ (CreateOutcome::Reconciled(_) | CreateOutcome::Reversed(_))
+                            if settlement == CreateSettlement::RetainedWithDuplicateEvidence =>
+                        {
+                            outcome
+                        }
                         outcome @ CreateOutcome::DuplicateOrderNumber { .. } => outcome,
-                        outcome if !protected => outcome,
+                        outcome if settlement == CreateSettlement::Immediate => outcome,
                         _ => duplicate_refusal(request.kind, answer),
                     })
                 }
             },
+        }
+    }
+
+    /// Apply the selected timing without claiming a read that this execution defers.
+    async fn settle_unconfirmed_create(
+        &self,
+        request: &CreateStepRequest<'_>,
+        settlement: CreateSettlement,
+        unconfirmed: Unconfirmed,
+    ) -> Result<CreateOutcome, Unconfirmed> {
+        match settlement {
+            CreateSettlement::Immediate => self.settle_or(request, unconfirmed).await,
+            CreateSettlement::Retained | CreateSettlement::RetainedWithDuplicateEvidence => {
+                Err(unconfirmed)
+            }
         }
     }
 
@@ -1879,7 +2000,7 @@ impl Gateway {
     ) -> Result<TaxpayerOutcome, Unanswered> {
         let span = tracing::info_span!("gateway.query_taxpayer", prefix = %prefix.as_str());
         let request = QueryTaxpayer::from(prefix.clone());
-        match self.client.send(&request).instrument(span).await {
+        match self.send(&request).instrument(span).await {
             Ok(info) => {
                 let taxpayer = QueryTaxpayerResponse::try_from(info)
                     .map_err(|error| Unanswered::Transport(error.to_string()))?;
@@ -2035,7 +2156,7 @@ impl Gateway {
         // Step 2: send.
         let storno = self.account.build_storno(request);
 
-        match self.client.send(&storno).await {
+        match self.send(&storno).await {
             Ok(response) => {
                 let Ok(created) = response.into_numbered() else {
                     // Acknowledgement metadata is not document evidence and
@@ -2328,7 +2449,7 @@ impl Gateway {
         }
         let request =
             DeleteProforma::new(ProformaSelector::InvoiceNumber(InvoiceNumber::new(number)));
-        match self.client.send(&request).await {
+        match self.send(&request).await {
             Ok(()) => {
                 tracing::info!(number = %number, "proforma deleted");
                 DeleteOutcome::Deleted
@@ -2370,7 +2491,7 @@ impl Gateway {
             .aggregator
             .clone_from(&self.account.defaults.aggregator);
 
-        match self.client.send(&request).await {
+        match self.send(&request).await {
             Ok(result)
                 if result
                     .invoice_number
@@ -2416,7 +2537,7 @@ impl Gateway {
         project: impl FnOnce(szamlazz_agent::ops::query_xml::InvoiceDocument) -> T,
     ) -> Result<T, QueryError> {
         let request = QueryInvoiceXml::new(selector);
-        match self.client.send(&request).await {
+        match self.send(&request).await {
             Ok(document) => {
                 let expected = match &request.selector {
                     InvoiceSelector::InvoiceNumber(number) => Some(number.as_str()),

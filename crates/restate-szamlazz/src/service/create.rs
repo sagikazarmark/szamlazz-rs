@@ -436,6 +436,28 @@ fn decide_proforma_by_number(
     }
 }
 
+/// Execution-specific named-link rule, followed by the common ownership/type decision.
+fn decide_proforma_for_execution(
+    outcome: QueryOutcome,
+    number: &str,
+    order: &OrderKey,
+    identity: &Identity,
+    config: &crate::config::WorkerConfig,
+    refs: &mut Refs,
+) -> Result<Option<CreateResponse>, Fault> {
+    if config.order_execution.permits_replay()
+        && let QueryOutcome::Found(document) = &outcome
+        && document.carries_order(order)
+        && document.document_type == DocumentType::Proforma
+        && !document.is_live()
+    {
+        return Ok(Some(
+            identity.conflict_about(ConflictReason::ProformaMissing, number),
+        ));
+    }
+    decide_proforma_by_number(outcome, number, order, identity, &config.namespace, refs)
+}
+
 /// `correct_invoice`'s decision on the verified base, pure: the base must be
 /// a live invoice carrying this order's number. Another order's, or none, is
 /// `conflict{not_managed, existing_number}` (checked first: a reversed
@@ -572,6 +594,24 @@ fn decide_lookup(
     })
 }
 
+/// Replay-enabled discovery also refuses an unselected proforma in the order hint.
+fn decide_lookup_for_execution(
+    outcome: LookupOutcome,
+    reissue: Option<&Reissue>,
+    identity: &Identity,
+    config: &crate::config::WorkerConfig,
+) -> Result<ControlFlow<CreateResponse, Option<String>>, Fault> {
+    if config.order_execution.permits_replay()
+        && let LookupOutcome::Foreign(document) = &outcome
+        && document.document_type == DocumentType::Proforma
+    {
+        return Ok(ControlFlow::Break(
+            identity.conflict_about(ConflictReason::ProformaLive, &document.number),
+        ));
+    }
+    decide_lookup(outcome, reissue, identity, &config.namespace)
+}
+
 impl Execution {
     // ----- entry points ----------------------------------------------------
 
@@ -612,6 +652,20 @@ impl Execution {
         {
             return Ok(response);
         }
+        if self.config.order_execution.permits_replay()
+            && kind == DocumentKind::Final
+            && let Some(response) = self
+                .exclusivity(
+                    ctx,
+                    &prepared,
+                    &identity,
+                    DocumentKind::Invoice,
+                    ConflictReason::PrepaidChain,
+                )
+                .await?
+        {
+            return Ok(response);
+        }
 
         // Step 2: the proforma link, on the kinds that convert a proforma
         // (`links_proforma`): the invoice and the prepayment invoice.
@@ -621,6 +675,36 @@ impl Execution {
                 .await?
         {
             return Ok(response);
+        }
+
+        if self.config.order_execution.permits_replay()
+            && (kind == DocumentKind::Final || matches!(prepared.proforma, ProformaLink::Number(_)))
+        {
+            let slot = ExternalId::for_kind(
+                &self.config.namespace,
+                &prepared.order,
+                DocumentKind::Proforma,
+            );
+            let found = lookup(
+                ctx,
+                self,
+                "lookup-proforma",
+                &slot,
+                &prepared.order,
+                IssuedKind::Proforma,
+            )
+            .await?;
+            if !matches!(&found,OwnershipOutcome::Live(document) if refs.proforma.as_deref()==Some(document.number.as_str()))
+                && let Some(response) = decide_exclusivity(
+                    found,
+                    ConflictReason::ProformaLive,
+                    &identity,
+                    &self.config.namespace,
+                )
+                .map_err(|fault| identity.about(&prepared.order, fault))?
+            {
+                return Ok(response);
+            }
         }
 
         let create = self.build(
@@ -889,12 +973,12 @@ impl Execution {
                 let found = verify(ctx, self, format!("verify-proforma-{number}"), number)
                     .await
                     .map_err(|fault| identity.about(&prepared.order, fault))?;
-                decide_proforma_by_number(
+                decide_proforma_for_execution(
                     found,
                     number,
                     &prepared.order,
                     identity,
-                    &self.config.namespace,
+                    &self.config,
                     refs,
                 )
                 .map_err(HandlerError::from)
@@ -918,11 +1002,11 @@ impl Execution {
 
         // Step 3: lookup, then decide on what it found.
         let found = self.lookup_step(ctx, order, &intent).await.map_err(about)?;
-        let reversed = match decide_lookup(
+        let reversed = match decide_lookup_for_execution(
             found,
             intent.reissue.as_ref(),
             identity,
-            &self.config.namespace,
+            &self.config,
         )
         .map_err(about)?
         {
@@ -954,19 +1038,22 @@ impl Execution {
         let order = order.clone();
         let our_numbers = intent.our_numbers.clone();
         let corrected_number = intent.corrected_number.clone();
+        let replay_enabled = self.config.order_execution.permits_replay();
         run_reading(
             ctx,
             format!("lookup-{kind}"),
             self,
             move |gateway| async move {
-                let outcome = gateway
-                    .lookup(LookupRequest {
-                        external_id: &external_id,
-                        kind,
-                        order: &order,
-                        our_numbers: &our_numbers,
-                    })
-                    .await?;
+                let request = LookupRequest {
+                    external_id: &external_id,
+                    kind,
+                    order: &order,
+                    our_numbers: &our_numbers,
+                };
+                if replay_enabled {
+                    return gateway.lookup_for_replay(request).await;
+                }
+                let outcome = gateway.lookup(request).await?;
                 // References have been resolved. A newly visible corrective must
                 // satisfy the same intent as the armed query and reconciliation.
                 Ok(match outcome {
@@ -1011,11 +1098,18 @@ impl Execution {
             intent.corrected_number.as_deref(),
         )
         .map_err(|error| Fault::invalid_input(error.to_string()))?;
+        if self.config.order_execution.permits_replay() {
+            let result = self.create_replay_enabled(ctx, request).await?;
+            return match result {
+                crate::gateway::recovery::WriteResult::Create(outcome) => Ok(outcome),
+                _ => Err(Fault::outcome_unknown("issuance remains unresolved").into()),
+            };
+        }
         let result = self
             .protected_write(
                 ctx,
-                order,
-                &intent.identity.external_id,
+                request.order(),
+                request.external_id(),
                 request.operation(),
                 format!("create-{kind}"),
                 move |gateway, _marker| async move { gateway.protected_create(request).await },
@@ -1043,6 +1137,86 @@ mod tests {
     use crate::contract::document::tests::sample_document;
     use crate::gateway::{IssuedDocument, Rejection, SzamlazzAnswer};
     use crate::test_support::Doc;
+
+    #[test]
+    fn execution_decisions_keep_named_proforma_ownership_and_liveness_order() {
+        use crate::config::OrderExecution;
+        for execution in [OrderExecution::Protected, OrderExecution::ReplayEnabled] {
+            let mut config = WorkerConfig::new(namespace());
+            config.order_execution = execution;
+            for (document_order, reversed, expected) in [
+                (Some("ORD-1"), false, None),
+                (
+                    Some("ORD-1"),
+                    true,
+                    if execution == OrderExecution::ReplayEnabled {
+                        Some(ConflictReason::ProformaMissing)
+                    } else {
+                        None
+                    },
+                ),
+                (Some("ORD-2"), true, Some(ConflictReason::NotManaged)),
+            ] {
+                let mut refs = Refs::default();
+                let response = decide_proforma_for_execution(
+                    QueryOutcome::Found(
+                        Doc {
+                            order: document_order,
+                            reversed,
+                            ..Doc::new("D-1", "D")
+                        }
+                        .boxed(),
+                    ),
+                    "D-1",
+                    &ord_1(),
+                    &invoice_identity(),
+                    &config,
+                    &mut refs,
+                )
+                .expect("decision");
+                assert_eq!(response.and_then(|r| r.conflict_reason), expected.clone());
+                assert_eq!(
+                    refs.proforma.as_deref(),
+                    if expected.is_none() {
+                        Some("D-1")
+                    } else {
+                        None
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn execution_lookup_decisions_classify_proforma_hints() {
+        use crate::config::OrderExecution;
+        for execution in [OrderExecution::Protected, OrderExecution::ReplayEnabled] {
+            let mut config = WorkerConfig::new(namespace());
+            config.order_execution = execution;
+            for document_type in ["D", "SZ"] {
+                let decision = decide_lookup_for_execution(
+                    LookupOutcome::Foreign(Doc::new("OTHER-1", document_type).boxed()),
+                    None,
+                    &invoice_identity(),
+                    &config,
+                )
+                .expect("decision");
+                let ControlFlow::Break(response) = decision else {
+                    panic!("foreign document must refuse issuance")
+                };
+                assert_eq!(
+                    response.conflict_reason,
+                    Some(
+                        if document_type == "D" && execution == OrderExecution::ReplayEnabled {
+                            ConflictReason::ProformaLive
+                        } else {
+                            ConflictReason::Foreign
+                        }
+                    )
+                );
+            }
+        }
+    }
 
     /// An execution as the prologue would build it for the test account.
     fn order() -> Execution {

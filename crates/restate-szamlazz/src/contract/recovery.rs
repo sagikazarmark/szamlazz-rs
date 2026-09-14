@@ -79,6 +79,17 @@ super::object::object_input! {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct UnresolvedWrite {
+    /// Operation-specific replay execution contract, absent on protected
+    /// markers. Unknown tokens cannot authorize recovery or resend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_contract: Option<ReplayExecutionContract>,
+    /// Pinned proforma reference submitted with ordinary or prepayment issuance. Omission
+    /// means no explicit link; recovery establishes issuance, not linkage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proforma_number: Option<String>,
+    /// Exact prepayment selected for final issuance; never substituted on replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepayment_number: Option<String>,
     /// Explicit state schema version.
     pub version: MarkerVersion,
     /// Unique marker token, the original invocation id.
@@ -107,6 +118,137 @@ pub struct UnresolvedWrite {
     pub credential_ref: String,
     /// Minimal operation-specific recovery intent.
     pub operation: WriteOperation,
+}
+}
+
+/// The approved replay-risk contracts; never inferred from the hosting target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub enum ReplayExecutionContract {
+    /// Ordinary issuance with fresh checks before unfinished-run resubmission.
+    #[serde(rename = "request_response_ordinary_v1")]
+    RequestResponseOrdinaryV1,
+    /// Proforma issuance with fresh invoice-family guards on unfinished replay.
+    #[serde(rename = "request_response_proforma_v1")]
+    RequestResponseProformaV1,
+    /// Prepayment issuance with pinned proforma and fresh exclusivity checks.
+    #[serde(rename = "request_response_prepayment_v1")]
+    RequestResponsePrepaymentV1,
+    /// Final issuance with a pinned prepayment prerequisite.
+    #[serde(rename = "request_response_final_v1")]
+    RequestResponseFinalV1,
+    /// Exact-target deletion; only an acknowledged deletion clears automatically.
+    #[serde(rename = "request_response_delete_v1")]
+    RequestResponseDeleteV1 {
+        /// Selection mode retained before sending.
+        mode: super::DeleteMode,
+        /// Whether the caller explicitly bypassed the credit-entry guard.
+        force: bool,
+        /// Provider id of the verified target, checked on every open execution.
+        document_id: i64,
+    },
+    /// Order reversal with a pinned verified original and fresh replay guards.
+    #[serde(rename = "request_response_storno_v1")]
+    RequestResponseStornoV1 {
+        /// Provider id of the original.
+        document_id: i64,
+        /// Original fulfillment date repeated by every send.
+        fulfillment_date: szamlazz_agent::Date,
+        /// Derived invoice form sent on reversal.
+        e_invoice: bool,
+        /// Original projected appearance code.
+        appearance: i64,
+    },
+}
+
+impl ReplayExecutionContract {
+    /// The same pinned deletion facts are used at admission and fresh verification.
+    pub(crate) fn for_delete(request: &super::DeleteProformaRequest, document_id: i64) -> Self {
+        Self::RequestResponseDeleteV1 {
+            mode: request.mode,
+            force: request.force,
+            document_id,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ReplayExecutionContract {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = ReplayExecutionContract;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a known execution contract")
+            }
+            fn visit_str<E: serde::de::Error>(self, token: &str) -> Result<Self::Value, E> {
+                match token {
+                    "request_response_ordinary_v1" => {
+                        Ok(ReplayExecutionContract::RequestResponseOrdinaryV1)
+                    }
+                    "request_response_proforma_v1" => {
+                        Ok(ReplayExecutionContract::RequestResponseProformaV1)
+                    }
+                    "request_response_prepayment_v1" => {
+                        Ok(ReplayExecutionContract::RequestResponsePrepaymentV1)
+                    }
+                    "request_response_final_v1" => {
+                        Ok(ReplayExecutionContract::RequestResponseFinalV1)
+                    }
+                    _ => Err(E::custom("unknown execution contract")),
+                }
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<Self::Value, M::Error> {
+                let result = match map.next_key::<String>()?.as_deref() {
+                    Some("request_response_delete_v1") => {
+                        let payload: DeleteExecution = map.next_value()?;
+                        ReplayExecutionContract::RequestResponseDeleteV1 {
+                            mode: payload.mode,
+                            force: payload.force,
+                            document_id: payload.document_id,
+                        }
+                    }
+                    Some("request_response_storno_v1") => {
+                        let payload: StornoExecution = map.next_value()?;
+                        ReplayExecutionContract::RequestResponseStornoV1 {
+                            document_id: payload.document_id,
+                            fulfillment_date: payload.fulfillment_date,
+                            e_invoice: payload.e_invoice,
+                            appearance: payload.appearance,
+                        }
+                    }
+                    _ => return Err(serde::de::Error::custom("unknown execution contract")),
+                };
+                if map.next_key::<String>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "execution contract requires one variant",
+                    ));
+                }
+                Ok(result)
+            }
+        }
+        de.deserialize_any(Visitor)
+    }
+}
+
+super::object::object_input! {
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteExecution { mode:super::DeleteMode, force:bool, document_id:i64 }
+}
+
+super::object::object_input! {
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StornoExecution {
+    document_id:i64,
+    #[serde(deserialize_with = "super::date::required")]
+    fulfillment_date:szamlazz_agent::Date,
+    e_invoice:bool,
+    appearance:i64
 }
 }
 
@@ -346,9 +488,13 @@ impl<'de> Deserialize<'de> for UnresolvedObservation {
                 let marker = fields.get("marker").cloned().ok_or_else(|| {
                     serde::de::Error::custom("unresolved observation requires marker")
                 })?;
-                match serde_json::from_value(marker) {
-                    Ok(marker) => Ok(Self::Unresolved { marker }),
-                    Err(_) => Ok(Self::Other { state, fields }),
+                match serde_json::from_value::<Box<UnresolvedWrite>>(marker.clone()) {
+                    Ok(decoded)
+                        if serde_json::to_value(&decoded).ok().as_ref() == Some(&marker) =>
+                    {
+                        Ok(Self::Unresolved { marker: decoded })
+                    }
+                    _ => Ok(Self::Other { state, fields }),
                 }
             }
             _ => Ok(Self::Other { state, fields }),

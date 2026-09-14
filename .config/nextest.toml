@@ -3,7 +3,7 @@
 dir = "target/nextest"
 
 [profile.default]
-default-filter = 'not ((package(szamlazz-agent) | package(restate-szamlazz)) & (binary(=live) | binary(=probes))) & not (package(restate-szamlazz) & (kind(lib) | binary(=e2e)) & test(/(^|::)e2e_/) & not test(/::e2e_only_/))'
+default-filter = 'not ((package(szamlazz-agent) | package(restate-szamlazz)) & (binary(=live) | binary(=probes))) & not (package(restate-szamlazz) & (kind(lib) | binary(=e2e) | binary(=request_response)) & test(/(^|::)e2e_/) & not test(/::e2e_only_/))'
 slow-timeout = { period = "10s" }
 
 [profile.ci]
@@ -11,7 +11,7 @@ slow-timeout = { period = "10s" }
 path = "junit.xml"
 
 [profile.e2e]
-default-filter = 'package(restate-szamlazz) & (kind(lib) | binary(=e2e)) & test(/(^|::)e2e_/) & not test(/::e2e_only_/)'
+default-filter = 'package(restate-szamlazz) & (kind(lib) | binary(=e2e) | binary(=request_response)) & test(/(^|::)e2e_/) & not test(/::e2e_only_/)'
 test-threads = 1
 retries = 0
 slow-timeout = { period = "60s", terminate-after = 20 }
@@ -29,6 +29,14 @@ failure-output = "immediate"
 [profile.live.junit]
 path = "junit.xml"
 store-success-output = true
+
+# Requires the examples/workers release bundle and npm dependencies. Kept out
+# of native e2e so the native suite doesn't acquire a Node/build prerequisite.
+[profile.workers]
+default-filter = 'package(restate-szamlazz) & binary(=workers) & test(/(^|::)e2e_workers_/)'
+test-threads = 1
+retries = 0
+slow-timeout = { period = "60s", terminate-after = 5 }
 
 [profile.probes]
 default-filter = 'package(szamlazz-agent) & binary(=probes)'

@@ -209,6 +209,12 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<CorrectRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
+        if self.parts.config.order_execution.permits_replay() {
+            return Err(super::support::Fault::invalid_input(
+                "corrective issuance is unsupported with replay_enabled Order execution",
+            )
+            .into());
+        }
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
         super::recovery::guard(&ctx).await?;
@@ -356,7 +362,8 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<crate::contract::recovery::RecoveryRequest>,
     ) -> HandlerResult<Json<crate::contract::recovery::RecoveryResponse>> {
-        self.recover_marker(&ctx, request.into_request()?)
+        let (request, raw) = request.into_request_with_json()?;
+        self.recover_marker(&ctx, request, raw["marker"].clone())
             .await
             .map(Json)
     }

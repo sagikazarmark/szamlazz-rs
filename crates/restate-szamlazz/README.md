@@ -25,9 +25,70 @@ are computed or validated against caller assertions, domain outcomes are returne
 
 ### Protection by operation
 
+Order execution is explicit deployment configuration on both native and Cloudflare:
+
+```toml
+namespace = "billing"
+order_execution = "replay_enabled" # default when omitted: "protected"
+```
+
+In Rust, set `WorkerConfig.order_execution = OrderExecution::ReplayEnabled` before
+`validate()` and `Order::from_parts`. No `test-util` feature or host-dependent
+financial semantics are involved. `Protected` retains existing acknowledged
+execution-local permission and all Order handlers, including correctives; it needs
+bidirectional execution for normal write progress. `ReplayEnabled` supports
+RequestResponse and bidirectional hosting, with the accepted replay risk below.
+The SDK host independently selects its protocol mode. Agent uses its normal shared
+implementation and needs no execution selector.
+
+Replay-enabled execution supports proforma creation and exact-target deletion, ordinary/prepayment/final
+invoices including exact-target reissue and pinned references, reads,
+Order storno and evidence-carrying recovery; Agent permits all its existing handlers,
+including unmanaged storno and credit-entry registration. It requires operator-confirmed
+provider duplicate-order checking, and accepts unfinished-run resubmission risk.
+Proforma deletion clears automatically only on an acknowledged deletion; a later
+absence/refusal or failed guard retains uncertainty. Named deletion keeps its exact
+target; namespace-owned deletion also refreshes the slot. Recovery requires audited
+deletion or non-execution evidence, never absence alone.
+Recorded uncertainty stays read-only. Corrective issuance is explicitly refused
+with `invalid_input` before provider I/O in this mode on either host. Observed
+duplicate corrective effects are why it does not inherit ordinary replay policy.
+Replay-enabled Order storno retains the verified original's provider id, fulfillment
+date and appearance. An interrupted open run refreshes that original before any
+resubmission; recorded uncertainty only reconciles. Agent storno keeps its distinct
+unmanaged query-first issue policy and no-Order guard.
+Agent credit entries retain their existing unkeyed additive/replacement replay risks
+and uncertainty faults, with no Order marker. The pre-release
+`experimental_request_response()` methods have been removed; replace the Order
+method with configuration and remove the Agent method. `test-util` now exposes
+only mock-sized unchecked configuration and interruption observers.
+See the [actual-service acceptance tests](tests/request_response/README.md) and
+[outcome/clearance table](../../docs/design/request-response-outcomes.md).
+The [workers-rs example](../../examples/workers/README.md) exercises these services
+in workerd with signed/scoped Restate calls. It documents the interim SDK patch,
+shared reqwest transport and runtime checks. The [execution-mode transition
+procedure](../../docs/operations/order-execution-transition.md) applies to every
+release, including same-mode Workers releases. Keep old immutable deployments for their
+retained invocations; marker compatibility is not journal compatibility.
+
+The recovery marker now carries optional `execution_contract`, `proforma_number` and `prepayment_number`
+fields. Existing JSON markers remain decodable; Rust code constructing
+`UnresolvedWrite` literals supplies `None` for legacy markers. Recovery requires
+the exact observed JSON, including omitted versus null members. The observation
+decoder preserves noncanonical known markers through `Other`; echo those fields
+as JSON rather than reconstructing a marker. The replay-enabled prepare result still
+requires its discriminator, so a legacy prepare cannot become resend permission.
+
+**Pre-release Rust rename (#247):** `contract::recovery::OrdinaryExecutionContract`
+is now `ReplayExecutionContract`, covering creates, deletion and storno. Serialized
+`request_response_*_v1` tokens and durable command names retain their existing
+spellings. Test observers use `WriteCheckpoint::CreateGuardsPassed` in place of
+`OrdinaryGuardsPassed`.
+
 | Operation | Protection and recovery |
 |---|---|
 | Order mutations | Serialized per scope/order. One acknowledged send permit; interrupted or unanswered writes retain a marker that blocks later mutations. Resume reconciles read-only; authorized recovery requires exact-marker evidence. |
+| Order mutations with `replay_enabled` | Serialized per scope/order. An unfinished unrecorded write can re-execute after fresh guards. Recorded uncertainty remains read-only; markers block later mutations. Corrective issuance is refused. |
 | Unmanaged Agent storno | Query-first execution relies on szamlazz.hu's storno idempotence. No Order marker or per-invoice lock; reconcile uncertainty before deliberately renewing. |
 | Agent credit-entry registration | An interrupted open run may repeat an additive entry or an older replacement. No Order marker; settle the earlier execution and exclude delayed execution before renewal. A caller lock alone cannot fence vendor processing. |
 
@@ -367,7 +428,7 @@ for exceptional replay (ADR 0009).
 
 ### What `Szamlazz.Order` guarantees
 
-- **Exactly one live document per kind per billing-unit Order** (proforma, invoice, prepayment, final), subject
+- **With `protected`: exactly one live document per kind per billing-unit Order** (proforma, invoice, prepayment, final), subject
   to the assumptions below, under caller retries,
   process crashes and concurrent callers. Same-key handlers run one at a time. After validation and the prologue,
   a target **ownership lookup** settles an existing document before prerequisites for a new send. An absent
@@ -375,8 +436,12 @@ for exceptional replay (ADR 0009).
   permitted execution queries szamlazz.hu by the document's external id *inside the same `ctx.run` closure* before it
   creates. A durable marker and acknowledged one-use permit prevent another send after interruption;
   an invisible result remains unresolved until read-only reconciliation or authorized recovery settles it.
-- **Correctives** are issued under a caller-supplied `correction_id`: the same id finds the corrective it
-  issued, a new id issues a new one.
+- **With `replay_enabled`:** the same ownership and prerequisite checks run, but an unfinished,
+  unrecorded write can query afresh and submit again. Recorded uncertainty stays read-only.
+  Matching issuance does not prove uniqueness or exclude delayed effects; provider per-type
+  duplicate-order checking and accepted non-regression behavior remain deployment prerequisites.
+- **Correctives under `protected`** are issued under a caller-supplied `correction_id`: the same id finds the corrective it
+  issued, a new id issues a new one. `replay_enabled` refuses corrective issuance before provider I/O.
 - **Storno** (`storno_invoice`) and **proforma deletion** are idempotent. A document reversed by anyone (the UI,
   support, this service) is reported as `reversed` from `<sztornozott>`. The storno carries the original's
   fulfillment date (`teljesitesDatum` = the verified document's `telj`), which NAV requires it to repeat; the
@@ -1101,7 +1166,9 @@ for a caller:
       With the default policy, Order mutations **pause after five attempts**, retaining their invocation and
       exclusive lock. The roughly 24 minutes of configured delays is not a completion deadline. A paused
       owner needs operator attention. After repair resume the same invocation: before arming it can continue
-      prerequisites toward its first send; after arming, replay only reconciles read-only. `get` remains an observation.
+      prerequisites toward its first send. With `protected`, after arming replay only reconciles read-only.
+      With `replay_enabled`, an unfinished unrecorded write can resubmit after fresh guards; a recorded
+      uncertain result only reconciles read-only. `get` remains an observation.
     - **A killed invocation** (manual kill, or exhaustion of a handler configured to kill, such as Agent
       storno) can return native error **text** in the envelope `message`, not the worker's `{code, message}`
       JSON. Preserve that native/raw error without inventing a fault code. Kill releases the lock but does
@@ -1269,10 +1336,13 @@ Exclusive Order prerequisite and reconciliation failures spend its invocation po
 No retry threshold is a hard send or elapsed-time bound; protected Order writes instead have one-use permission.
 
 **Unresolved writes.** Every Order mutation checks the durable marker before resolving the account or reading
-prerequisites. Before a write it records minimal recovery identity, sets the marker, awaits durable arming,
+prerequisites. With `protected`, before a write it records minimal recovery identity, sets the marker, awaits durable arming,
 and consumes an execution-local one-use permission. Completed arming replay grants no permission. An open write
 replay therefore reconciles without sending. Uncertainty becomes a read-only run whose failures spend the
-invocation policy and eventually pause with the lock retained; `[issue]` never authorizes another Order send.
+invocation policy and eventually pause with the lock retained. With `replay_enabled`, an acknowledged
+marker barrier replaces execution-local arming; unfinished unrecorded execution can resubmit after fresh
+operation-specific guards. A recorded uncertain result remains read-only in both modes. `[issue]` never
+authorizes another Order send.
 Cancellation returns structured uncertainty and retains the marker. Kill releases the lock but not the marker.
 
 Keep the original Idempotency-Key while unfinished, paused included. Empty queries, elapsed time, cancellation,

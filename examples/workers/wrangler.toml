@@ -1,0 +1,6 @@
+name = "szamlazz-experimental"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-07-30"
+
+[build]
+command = "worker-build --release --no-panic-recovery --locked"

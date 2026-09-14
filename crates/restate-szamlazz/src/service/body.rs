@@ -30,12 +30,12 @@ use super::support::Fault;
 /// Callers of the generated `OrderClient` / `AgentClient` build one with
 /// [`Body::new`] (or `From<T>`); it serialises as the request itself.
 #[derive(Debug)]
-pub struct Body<T>(Result<T, serde_json::Error>);
+pub struct Body<T>(Result<T, serde_json::Error>, Option<Bytes>);
 
 impl<T> Body<T> {
     /// A body holding the decoded `request`.
     pub const fn new(request: T) -> Self {
-        Self(Ok(request))
+        Self(Ok(request), None)
     }
 
     /// The decoded request, or the `invalid_input` fault (400) naming what
@@ -43,6 +43,22 @@ impl<T> Body<T> {
     pub(super) fn into_request(self) -> Result<T, Fault> {
         self.0
             .map_err(|error| Fault::invalid_input(format!("malformed request body: {error}")))
+    }
+
+    /// Recovery compares the exact JSON marker value, including member presence.
+    /// Generated Rust calls are serialized normally before reaching this boundary.
+    pub(super) fn into_request_with_json(self) -> Result<(T, serde_json::Value), Fault>
+    where
+        T: serde::Serialize,
+    {
+        let raw = self.1.clone();
+        let request = self.into_request()?;
+        let value = match raw {
+            Some(raw) => serde_json::from_slice(&raw),
+            None => serde_json::to_value(&request),
+        }
+        .map_err(|_| Fault::invalid_input("could not decode exact recovery intent"))?;
+        Ok((request, value))
     }
 }
 
@@ -59,11 +75,14 @@ where
     type Error = std::convert::Infallible;
 
     fn deserialize(bytes: &mut Bytes) -> Result<Self, Self::Error> {
-        Ok(Self((|| {
-            let raw: &serde_json::value::RawValue = serde_json::from_slice(bytes)?;
-            check_json_objects(raw, 0)?;
-            serde_json::from_slice(bytes)
-        })()))
+        Ok(Self(
+            (|| {
+                let raw: &serde_json::value::RawValue = serde_json::from_slice(bytes)?;
+                check_json_objects(raw, 0)?;
+                serde_json::from_slice(bytes)
+            })(),
+            Some(bytes.clone()),
+        ))
     }
 }
 

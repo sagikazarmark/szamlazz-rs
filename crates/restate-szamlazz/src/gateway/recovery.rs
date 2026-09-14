@@ -190,6 +190,426 @@ impl WriteResult {
 }
 
 impl Gateway {
+    /// Replay-enabled deletion refreshes the pinned target before resubmission.
+    /// Only acknowledged deletion settles; an absent target is still uncertainty.
+    pub(crate) async fn delete_replay_enabled(
+        &self,
+        external_id: &ExternalId,
+        marker: &UnresolvedWrite,
+        found: &FoundDocument,
+        request: &crate::contract::DeleteProformaRequest,
+    ) -> WriteResult {
+        use super::OwnershipOutcome;
+        use crate::contract::DeleteMode;
+        use crate::contract::recovery::ReplayExecutionContract as Contract;
+
+        let contract = Contract::for_delete(request, found.document_id);
+        if marker.execution_contract != Some(contract)
+            || marker.operation
+                != (WriteOperation::Delete {
+                    number: found.number.clone(),
+                })
+        {
+            return WriteResult::unresolved("deletion request differs from retained intent");
+        }
+        let order = &marker.order;
+        if request.mode == DeleteMode::NamespaceOwned {
+            match self
+                .lookup_ours(external_id, order, crate::identity::IssuedKind::Proforma)
+                .await
+            {
+                Ok(OwnershipOutcome::Live(current) | OwnershipOutcome::Reversed(current))
+                    if current.number == found.number
+                        && current.document_id == found.document_id => {}
+                Ok(OwnershipOutcome::CredentialsRejected(answer)) => {
+                    answer.warn_credentials_rejected(external_id.namespace());
+                    return WriteResult::unresolved(format!(
+                        "deletion namespace credentials rejected: {}",
+                        answer.code
+                    ));
+                }
+                Ok(OwnershipOutcome::Absent) => {
+                    return WriteResult::unresolved(
+                        "deletion namespace holder absent; absence does not settle deletion",
+                    );
+                }
+                Ok(OwnershipOutcome::Api(answer)) => {
+                    return WriteResult::unresolved(format!(
+                        "deletion namespace vendor code {}",
+                        answer.code
+                    ));
+                }
+                Err(cause) => {
+                    return WriteResult::unresolved(format!(
+                        "deletion namespace query unanswered: {cause}"
+                    ));
+                }
+                _ => {
+                    return WriteResult::unresolved(
+                        "deletion namespace target changed or collided",
+                    );
+                }
+            }
+        }
+        match self.delete_proforma(found, order, request.force).await {
+            DeleteOutcome::Deleted => WriteResult::Delete(DeleteOutcome::Deleted),
+            DeleteOutcome::CredentialsRejected(answer) => {
+                answer.warn_credentials_rejected(external_id.namespace());
+                WriteResult::unresolved(format!("deletion credentials rejected: {}", answer.code))
+            }
+            DeleteOutcome::AlreadyGone => WriteResult::unresolved(
+                "proforma reported absent; absence does not settle earlier deletion",
+            ),
+            DeleteOutcome::Paid => WriteResult::unresolved(
+                "fresh deletion paid guard refused; earlier deletion remains unresolved",
+            ),
+            DeleteOutcome::TargetChanged => WriteResult::unresolved(
+                "fresh deletion target changed; earlier deletion remains unresolved",
+            ),
+            DeleteOutcome::Api(answer) => {
+                WriteResult::unresolved(format!("deletion guard vendor code {}", answer.code))
+            }
+            DeleteOutcome::Rejected(rejection) => WriteResult::unresolved(format!(
+                "deletion refused: {}; earlier execution remains unresolved",
+                rejection.code
+            )),
+            DeleteOutcome::Inconclusive(answer) => {
+                WriteResult::unresolved(format!("inconclusive deletion code {}", answer.code))
+            }
+            DeleteOutcome::GuardFailed(cause) => {
+                WriteResult::unresolved(format!("deletion guard unanswered: {cause}"))
+            }
+            DeleteOutcome::Lost(cause) => {
+                WriteResult::unresolved(format!("deletion answer lost: {cause}"))
+            }
+        }
+    }
+
+    /// Replay-enabled Order storno: settle existing evidence before inspecting
+    /// fresh send guards; only the pinned live original can authorize replay.
+    pub(crate) async fn storno_replay_enabled(
+        &self,
+        request: super::StornoStepRequest<'_>,
+        marker: &UnresolvedWrite,
+        pinned: &FoundDocument,
+    ) -> WriteResult {
+        use crate::contract::recovery::ReplayExecutionContract as Contract;
+        let expected = Contract::RequestResponseStornoV1 {
+            document_id: pinned.document_id,
+            fulfillment_date: request.fulfillment_date,
+            e_invoice: request.e_invoice,
+            appearance: pinned.appearance,
+        };
+        if marker.execution_contract != Some(expected)
+            || marker.operation
+                != (WriteOperation::Storno {
+                    number: request.invoice_number.to_owned(),
+                })
+            || marker.external_id != request.external_id.as_str()
+        {
+            return WriteResult::unresolved("storno request differs from retained original intent");
+        }
+        match self
+            .lookup_order_storno_checked(request.external_id, &marker.order, request.invoice_number)
+            .await
+        {
+            Ok(StornoLookupOutcome::AlreadyReversed { .. }) => {
+                return self.reconcile_write(marker, None).await;
+            }
+            Ok(StornoLookupOutcome::Absent) => {}
+            Err(QueryError::CredentialsRejected(answer))
+            | Ok(StornoLookupOutcome::CredentialsRejected(answer)) => {
+                answer.warn_credentials_rejected(request.external_id.namespace());
+                return WriteResult::unresolved(format!(
+                    "storno lookup credentials rejected: {}",
+                    answer.code
+                ));
+            }
+            Err(QueryError::Api(answer) | QueryError::Transient(answer))
+            | Ok(StornoLookupOutcome::Api(answer)) => {
+                return WriteResult::unresolved(format!(
+                    "storno lookup vendor code {}",
+                    answer.code
+                ));
+            }
+            Err(cause) => {
+                return WriteResult::unresolved(format!("storno lookup inconclusive: {cause}"));
+            }
+        }
+        let fresh = match self.verify(request.invoice_number).await {
+            Ok(QueryOutcome::Found(found)) => found,
+            Ok(QueryOutcome::CredentialsRejected(answer)) => {
+                answer.warn_credentials_rejected(request.external_id.namespace());
+                return WriteResult::unresolved(format!(
+                    "original credentials rejected: {}",
+                    answer.code
+                ));
+            }
+            Ok(QueryOutcome::Api(answer)) => {
+                return WriteResult::unresolved(format!(
+                    "original query vendor code {}",
+                    answer.code
+                ));
+            }
+            Ok(QueryOutcome::NotFound) => {
+                return WriteResult::unresolved("original absent; reversal not established");
+            }
+            Err(cause) => {
+                return WriteResult::unresolved(format!("original query unanswered: {cause}"));
+            }
+        };
+        if fresh.document_id != pinned.document_id
+            || !fresh.carries_order(&marker.order)
+            || !fresh.is_stornoable()
+            || fresh.fulfillment_date != Some(request.fulfillment_date)
+            || fresh.appearance != pinned.appearance
+        {
+            return WriteResult::unresolved("fresh original differs from pinned storno intent");
+        }
+        if !fresh.is_live() {
+            return self.reconcile_write(marker, None).await;
+        }
+        match self.storno_send(request, Some(marker)).await {
+            Ok(outcome @ (StornoOutcome::Reversed(_) | StornoOutcome::AlreadyReversed { .. })) => {
+                WriteResult::Storno(outcome)
+            }
+            Ok(StornoOutcome::CredentialsRejected(answer)) => {
+                answer.warn_credentials_rejected(request.external_id.namespace());
+                WriteResult::unresolved(format!("storno credentials rejected: {}", answer.code))
+            }
+            Ok(StornoOutcome::Rejected(rejection)) => WriteResult::unresolved(format!(
+                "storno refused: {}; earlier execution remains unresolved",
+                rejection.code
+            )),
+            Ok(_) => WriteResult::unresolved("storno answer did not establish reversal"),
+            Err(cause) => WriteResult::Unresolved(WriteDiagnostic::unconfirmed(cause)),
+        }
+    }
+    /// Replay-enabled creation: open-run replay may submit again after fresh absence and
+    /// guards. Kept distinct from the public consumed-permission contract.
+    pub(crate) async fn create_replay_enabled<F, Fut>(
+        &self,
+        request: super::CreateStepRequest<'_>,
+        before_send: F,
+    ) -> WriteResult
+    where
+        F: FnOnce() -> Fut + Send,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        // Defence in depth: this seam is never a blanket permission for kinds.
+        if request.replay_contract().is_none() || request.corrected_number.is_some() {
+            return WriteResult::unresolved("unsupported replay-enabled issuance intent");
+        }
+        // After admission a different matching holder is replacement evidence,
+        // not a new target to send past. The expected old holder alone can permit
+        // a resend, and only while it remains reversed.
+        match self
+            .seen(request.external_id, request.order, request.kind)
+            .await
+        {
+            Ok(super::Seen::Absent) if request.reversed.is_none() => {}
+            Ok(super::Seen::Reversed(found)) if request.reversed == Some(found.number.as_str()) => {
+            }
+            Ok(super::Seen::Live(found)) if request.reversed != Some(found.number.as_str()) => {
+                return WriteResult::Create(CreateOutcome::Found(found));
+            }
+            Ok(super::Seen::Reversed(found)) => {
+                return WriteResult::Create(CreateOutcome::Reversed(found));
+            }
+            Ok(_) => {
+                return WriteResult::unresolved(
+                    "holder does not permit the retained issuance intent",
+                );
+            }
+            Err(QueryError::CredentialsRejected(answer)) => {
+                answer.warn_credentials_rejected(request.external_id.namespace());
+                return WriteResult::unresolved(format!(
+                    "holder credentials rejected: {}",
+                    answer.code
+                ));
+            }
+            Err(_) => return WriteResult::unresolved("holder query failed"),
+        }
+        // Target evidence settles first, even if a prerequisite has since changed.
+        // Keep these reads sequential: namespace guards, pinned references, then hint.
+        if let Err(unresolved) = self.check_replay_create_kinds(&request).await {
+            return WriteResult::Unresolved(unresolved);
+        }
+        if let Err(unresolved) = self.check_replay_create_references(&request).await {
+            return WriteResult::Unresolved(unresolved);
+        }
+        if let Err(unresolved) = self.check_replay_create_hint(&request).await {
+            return WriteResult::Unresolved(unresolved);
+        }
+        before_send().await;
+        replay_create_result(
+            self.create_send(
+                &request,
+                super::CreateSettlement::RetainedWithDuplicateEvidence,
+            )
+            .await,
+            request.external_id.namespace(),
+        )
+    }
+
+    async fn check_replay_create_kinds(
+        &self,
+        request: &super::CreateStepRequest<'_>,
+    ) -> Result<(), WriteDiagnostic> {
+        use crate::identity::{DocumentKind, IssuedKind};
+        let namespace = request
+            .external_id
+            .namespace()
+            .parse()
+            .map_err(|_| WriteDiagnostic::new("invalid issuance namespace"))?;
+        let proforma = request.proforma_number();
+        let prepayment = request.prepayment_number();
+        if request.kind == IssuedKind::Final && prepayment.is_none() {
+            return Err(WriteDiagnostic::new(
+                "final issuance requires pinned prepayment",
+            ));
+        }
+        let guarded = if request.kind == IssuedKind::Proforma {
+            [
+                DocumentKind::Invoice,
+                DocumentKind::Prepayment,
+                DocumentKind::Final,
+            ]
+        } else if request.kind == IssuedKind::Final {
+            [
+                DocumentKind::Invoice,
+                DocumentKind::Prepayment,
+                DocumentKind::Proforma,
+            ]
+        } else if request.kind == IssuedKind::Prepayment {
+            [
+                DocumentKind::Invoice,
+                DocumentKind::Final,
+                DocumentKind::Proforma,
+            ]
+        } else {
+            [
+                DocumentKind::Prepayment,
+                DocumentKind::Final,
+                DocumentKind::Proforma,
+            ]
+        };
+        for kind in guarded {
+            let id = ExternalId::for_kind(&namespace, request.order, kind);
+            match self.lookup_ours(&id, request.order, kind.into()).await {
+                Ok(super::OwnershipOutcome::Live(found))
+                    if kind == DocumentKind::Prepayment
+                        && request.kind == IssuedKind::Final
+                        && prepayment == Some(found.number.as_str()) => {}
+                Ok(super::OwnershipOutcome::Absent | super::OwnershipOutcome::Reversed(_))
+                    if kind == DocumentKind::Prepayment && request.kind == IssuedKind::Final =>
+                {
+                    return Err(WriteDiagnostic::new("pinned prepayment absent or reversed"));
+                }
+                Ok(super::OwnershipOutcome::Absent | super::OwnershipOutcome::Reversed(_)) => {}
+                Ok(super::OwnershipOutcome::Live(found))
+                    if kind == DocumentKind::Proforma
+                        && proforma == Some(found.number.as_str()) => {}
+                Ok(super::OwnershipOutcome::CredentialsRejected(answer)) => {
+                    answer.warn_credentials_rejected(request.external_id.namespace());
+                    return Err(WriteDiagnostic::new(format!(
+                        "fresh {kind} credentials rejected: {}",
+                        answer.code
+                    )));
+                }
+                _ => {
+                    return Err(WriteDiagnostic::new(format!(
+                        "fresh {kind} guard did not permit issuance"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn check_replay_create_references(
+        &self,
+        request: &super::CreateStepRequest<'_>,
+    ) -> Result<(), WriteDiagnostic> {
+        use crate::identity::IssuedKind;
+        if let Some(number) = request.prepayment_number() {
+            match self.verify(number).await {
+                Ok(super::QueryOutcome::Found(found))
+                    if found.is_ours(request.order, IssuedKind::Prepayment) && found.is_live() => {}
+                Ok(super::QueryOutcome::CredentialsRejected(answer)) => {
+                    answer.warn_credentials_rejected(request.external_id.namespace());
+                    return Err(WriteDiagnostic::new(format!(
+                        "prepayment credentials rejected: {}",
+                        answer.code
+                    )));
+                }
+                _ => {
+                    return Err(WriteDiagnostic::new(
+                        "pinned prepayment no longer live on this Order",
+                    ));
+                }
+            }
+        }
+        if let Some(number) = request.proforma_number() {
+            match self.verify(number).await {
+                Ok(super::QueryOutcome::Found(found))
+                    if found.carries_order(request.order)
+                        && found.document_type == szamlazz_agent::DocumentType::Proforma
+                        && found.is_live() => {}
+                Ok(super::QueryOutcome::CredentialsRejected(answer)) => {
+                    answer.warn_credentials_rejected(request.external_id.namespace());
+                    return Err(WriteDiagnostic::new(format!(
+                        "pinned proforma credentials rejected: {}",
+                        answer.code
+                    )));
+                }
+                _ => {
+                    return Err(WriteDiagnostic::new(
+                        "pinned proforma no longer live on this Order",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn check_replay_create_hint(
+        &self,
+        request: &super::CreateStepRequest<'_>,
+    ) -> Result<(), WriteDiagnostic> {
+        use crate::identity::IssuedKind;
+        let prepayment = request.prepayment_number();
+        let proforma = request.proforma_number();
+        // Unlike the ordinary best-effort lookup hint, a failed fresh hint must
+        // not authorize an unfinished-run resend. Proformas can be implicitly
+        // consumed even when they are not under our namespace's external id.
+        match self.hint_raw(request.order).await {
+            Err(QueryError::NotFound) => {}
+            Err(QueryError::CredentialsRejected(answer)) => {
+                answer.warn_credentials_rejected(request.external_id.namespace());
+                return Err(WriteDiagnostic::new(format!(
+                    "fresh order hint credentials rejected: {}",
+                    answer.code
+                )));
+            }
+            Ok(found)
+                if (prepayment == Some(found.number.as_str())
+                    && found.is_ours(request.order, IssuedKind::Prepayment))
+                    || (found.document_type == szamlazz_agent::DocumentType::Proforma
+                        && proforma == Some(found.number.as_str())
+                        && found.carries_order(request.order))
+                    || !found.is_live()
+                    || (!found.is_invoice_family()
+                        && found.document_type != szamlazz_agent::DocumentType::Proforma) => {}
+            _ => {
+                return Err(WriteDiagnostic::new(
+                    "fresh order hint did not permit issuance",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// The protected Order lookup: only absence permits a send. A holder that
     /// cannot establish this order's reversal is an unanswered evidence read.
     /// The fresh original check stays inside the same durable lookup operation.
@@ -300,7 +720,10 @@ impl Gateway {
             }
             Err(super::QueryError::Transport(message)) => return WriteResult::unresolved(message),
         }
-        match self.create_send(&request, true).await {
+        match self
+            .create_send(&request, super::CreateSettlement::Retained)
+            .await
+        {
             Ok(outcome) => WriteResult::Create(outcome),
             // Uncertain sends continue through the shared read-only evidence seam.
             Err(cause) => WriteResult::Unresolved(WriteDiagnostic::unconfirmed(cause)),
@@ -440,10 +863,21 @@ impl Gateway {
                 ReconciliationOutcome::Reversed {
                     storno_number,
                     storno_document_id,
-                } => WriteResult::Storno(StornoOutcome::AlreadyReversed {
-                    storno_number,
-                    storno_document_id,
-                }),
+                } => {
+                    if let Some(crate::contract::recovery::ReplayExecutionContract::RequestResponseStornoV1 {document_id,fulfillment_date,appearance,..})=marker.execution_contract
+                        && let WriteOperation::Storno {number}=&marker.operation {
+                        match self.verify(number).await? {
+                            QueryOutcome::Found(original) if original.document_id==document_id && original.fulfillment_date==Some(fulfillment_date) && original.appearance==appearance && original.carries_order(&marker.order) && original.is_stornoable() && original.reversed==Some(true)=>{},
+                            QueryOutcome::CredentialsRejected(answer)=>return Ok(WriteResult::Answered {credentials:true,answer}),
+                            QueryOutcome::Api(answer)=>return Ok(WriteResult::Answered {credentials:false,answer}),
+                            _=>return Ok(WriteResult::unresolved("reversal evidence does not match pinned original")),
+                        }
+                    }
+                    WriteResult::Storno(StornoOutcome::AlreadyReversed {
+                        storno_number,
+                        storno_document_id,
+                    })
+                }
                 ReconciliationOutcome::Inconclusive { reason } => WriteResult::unresolved(reason),
                 ReconciliationOutcome::CredentialsRejected(answer) => WriteResult::Answered {
                     credentials: true,
@@ -580,6 +1014,34 @@ impl Gateway {
     }
 }
 
+/// Positive issuance alone clears under accepted create replay risk. A later
+/// refusal/collision says nothing about an interrupted earlier execution.
+fn replay_create_result(
+    result: Result<CreateOutcome, super::Unconfirmed>,
+    namespace: &str,
+) -> WriteResult {
+    match result {
+        Ok(
+            outcome @ (CreateOutcome::Issued(_)
+            | CreateOutcome::Found(_)
+            | CreateOutcome::Reconciled(_)
+            | CreateOutcome::Reversed(_)),
+        ) => WriteResult::Create(outcome),
+        Ok(CreateOutcome::CredentialsRejected(answer)) => {
+            answer.warn_credentials_rejected(namespace);
+            WriteResult::unresolved(format!("issuance credentials rejected: {}", answer.code))
+        }
+        Ok(CreateOutcome::Rejected(rejection)) => {
+            WriteResult::unresolved(format!("issuance refusal: {}", rejection.code))
+        }
+        Ok(CreateOutcome::DuplicateOrderNumber { answer, .. }) => {
+            WriteResult::unresolved(format!("issuance duplicate refusal: {}", answer.code))
+        }
+        Ok(_) => WriteResult::unresolved("guard or query did not establish issuance"),
+        Err(cause) => WriteResult::Unresolved(WriteDiagnostic::unconfirmed(cause)),
+    }
+}
+
 /// Alert before a fallback can replace the answer. This does not settle the
 /// earlier write or change the retryable reconciliation result.
 pub(super) fn warn_reconciliation_credentials(
@@ -630,6 +1092,9 @@ mod tests {
             let gateway = open_gateway(account, Credentials::agent_key("key"));
             let id = ExternalId::new("acct:ORD-1:storno:SZ-1");
             let marker = UnresolvedWrite {
+                prepayment_number: None,
+                execution_contract: None,
+                proforma_number: None,
                 version: MarkerVersion,
                 token: "owner".into(),
                 owner_invocation: "owner".into(),
@@ -776,6 +1241,9 @@ mod tests {
             let gateway = open_gateway(account, Credentials::agent_key("PRIVATE-KEY"));
             let external_id = ExternalId::new("acct:ORD-1:storno:SZ-1");
             let marker = UnresolvedWrite {
+                prepayment_number: None,
+                execution_contract: None,
+                proforma_number: None,
                 version: MarkerVersion,
                 token: "owner".into(),
                 owner_invocation: "owner".into(),
@@ -981,7 +1449,7 @@ mod tests {
                         None,
                     )
                     .expect("consistent create intent"),
-                    true,
+                    crate::gateway::CreateSettlement::Retained,
                 )
                 .await
                 .expect("settled refusal");
@@ -1011,6 +1479,9 @@ mod tests {
             account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
             let gateway = open_gateway(account, Credentials::agent_key("PRIVATE-KEY"));
             let marker = UnresolvedWrite {
+                prepayment_number: None,
+                execution_contract: None,
+                proforma_number: None,
                 version: MarkerVersion,
                 token: "owner".into(),
                 owner_invocation: "owner".into(),
@@ -1082,6 +1553,9 @@ mod tests {
         let gateway = open_gateway(account, Credentials::agent_key("PRIVATE-KEY"));
         let external_id = ExternalId::new("acct:ORD-1:storno:SZ-1");
         let marker = UnresolvedWrite {
+            prepayment_number: None,
+            execution_contract: None,
+            proforma_number: None,
             version: MarkerVersion,
             token: "owner".into(),
             owner_invocation: "owner".into(),
@@ -1147,6 +1621,9 @@ mod tests {
         let gateway = open_gateway(account, Credentials::agent_key("PRIVATE-KEY"));
         let external_id = ExternalId::new("acct:ORD-1:storno:SZ-1");
         let marker = UnresolvedWrite {
+            prepayment_number: None,
+            execution_contract: None,
+            proforma_number: None,
             version: MarkerVersion,
             token: "owner".into(),
             owner_invocation: "owner".into(),

@@ -36,6 +36,12 @@ mutations; assign an operator to each unresolved incident.
 
 ## Resume first
 
+Inspect the original deployment's `order_execution` setting. The protected rule
+below applies to `protected` (the default). With `replay_enabled`, an interrupted
+**unrecorded** write may execute again after fresh operation-specific checks;
+recorded uncertainty only reconciles read-only. Always resume on the original
+immutable deployment/mode. See [execution transitions](order-execution-transition.md).
+
 Repair credentials or connectivity and resume the owner on its pinned deployment. Completed arming replay does
 not grant another send; recovery only reads. Matching positive evidence completes the operation. Further absence
 or inconclusive evidence eventually pauses again. Keep the original Idempotency-Key while unfinished; it attaches

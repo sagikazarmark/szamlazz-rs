@@ -1,0 +1,31 @@
+[package]
+name = "szamlazz-workers-example"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+acceptance-tests = []
+
+# Keep the interim SDK override local to this host example.
+[workspace]
+
+[dependencies]
+restate-szamlazz = { path = "../../crates/restate-szamlazz" }
+worker = { version = "=0.8.5", features = ["http"] }
+http-body-util = "0.1"
+serde_json = "1"
+wasm-bindgen = "=0.2.125"
+futures-util = "0.3"
+gloo-timers = { version = "0.3", features = ["futures"] }
+
+[patch.crates-io]
+restate-sdk = { git = "https://github.com/sagikazarmark/restate-sdk-rust", rev = "e882e9e04f9ad9942b4fe7f3788999a521dfa336" }
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1

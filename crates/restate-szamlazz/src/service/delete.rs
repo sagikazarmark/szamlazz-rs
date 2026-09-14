@@ -67,6 +67,16 @@ impl Execution {
             fault.message = format!("proforma {number}: {}", fault.message);
             about(fault)
         };
+        if self.config.order_execution.permits_replay() {
+            let result = self
+                .delete_replay_enabled(ctx, &order, &proforma_id, found, request)
+                .await?;
+            let crate::gateway::recovery::WriteResult::Delete(outcome) = result else {
+                return Err(Fault::outcome_unknown("unexpected recovery operation").into());
+            };
+            return delete_response(outcome, &self.config.namespace)
+                .map_err(|fault| target_fault(fault).into());
+        }
         let outcome = {
             let target_order = order.clone();
             let result = self

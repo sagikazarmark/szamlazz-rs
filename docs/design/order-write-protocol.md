@@ -1,5 +1,12 @@
 # Protected Order write protocol (#216)
 
+**Execution selection (#247):** This document defines `order_execution = "protected"`,
+the supported default. [ADR 0019](../adr/0019-request-response-ordinary-invoice-replay.md)
+also defines explicit `replay_enabled` execution for RequestResponse-compatible
+progress under the [operation-specific outcome table](request-response-outcomes.md).
+Correctives remain protected-only. Readable marker state never authorizes replaying
+an old armed invocation under new send semantics.
+
 Implemented command protocol, following [the approved recovery decision](unresolved-order-writes.md).
 The test seams are confirmed: public Gateway, contract serialization, and real Restate ingress/admin.
 

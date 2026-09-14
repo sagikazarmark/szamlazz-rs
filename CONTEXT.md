@@ -322,6 +322,23 @@ _Avoid_: unknown outcome (the fault is `outcome_unknown`; this is what precedes 
 The Számla Agent crate's answer to "may a document exist despite this error?": `szamlazz_agent::OutcomeClass`, from `ErrorCode::outcome_class()`, `ResponseError::outcome_class()` and `ClientError::outcome_class()`: `Rejected` (szamlazz.hu refused before acting; the credential codes 3/135/136/164 included), `Unknown` (1, 55, 56 without a number, every code the crate does not know, `szlahu_down`, a transport or parse failure; retain uncertainty and reconcile read-only), `DuplicateOrderNumber` (71/152), `NotFound` (7). Distinct from `is_retryable()`, which says whether the same *query* can succeed later (1, 55) and is never permission to re-send a create. The worker's create and storno steps take their API-code arms from it and add `CredentialsRejected` on top, read off `ErrorCode::is_credential_error()` (3/135/136/164, a subset of `Rejected`; the agent crate's method since #128, so every consumer gets the same answer); `#[non_exhaustive]`, and a class the worker does not know is treated as `Unknown`. Decision: #13.
 _Avoid_: retryable (a different question), error class (it classifies the outcome, not the error), severity
 
+**Order execution**:
+The explicitly selected financial execution contract, independent of the hosting
+protocol. Protected execution consumes acknowledged execution-local send permission;
+replay-enabled execution accepts operation-specific resubmission risk for unfinished,
+unrecorded writes after fresh checks. Recorded uncertainty remains read-only in both.
+Protected is the default; corrective issuance requires it. ADR 0019 defines the
+operation boundaries and release transitions.
+_Avoid_: host or compilation target as financial policy, RequestResponse as the execution setting, test-util opt-in for supported execution
+
+**Replay-enabled write risk**:
+The accepted residual risk when an interrupted, unrecorded write may be resubmitted
+after fresh operation-specific checks. Creates rely on the account's enabled provider
+duplicate-order checking; recorded uncertainty still requires read-only settlement.
+Matching completion establishes neither uniqueness nor exclusion of delayed effects.
+ADR 0019 defines the supported operations; corrective issuance remains excluded.
+_Avoid_: at-most-once sending, universal invoice idempotency, corrective deduplication, timeout as resend permission
+
 **Unresolved write**:
 A write whose external effect may still occur or may have occurred without a conclusive answer. An empty query,
 elapsed time, cancellation or invocation kill does not settle it. An **unresolved-write marker** records that

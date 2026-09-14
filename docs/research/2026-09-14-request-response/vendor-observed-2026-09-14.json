@@ -1,0 +1,535 @@
+[
+  {
+    "base_order": "vb-61e35a2ff49343629c06e98ae112e7bb",
+    "elapsed_ms": 0,
+    "event": "start",
+    "ordinary_order": "vp-61e35a2ff49343629c06e98ae112e7bb",
+    "planned_create_sends": 5,
+    "run": "61e35a2ff49343629c06e98ae112e7bb",
+    "test_account_and_duplicate_toggle": "user confirmed",
+    "timestamp": "2026-09-14T15:43:36.674111531Z",
+    "transport": "native reqwest; no retries or redirects; 60s timeout"
+  },
+  {
+    "elapsed_ms": 89,
+    "event": "pair_intent",
+    "external_id": "vendor-prototype:vp-61e35a2ff49343629c06e98ae112e7bb:invoice",
+    "independent_sessions": true,
+    "label": "ordinary",
+    "order": "vp-61e35a2ff49343629c06e98ae112e7bb",
+    "planned_sends": 2
+  },
+  {
+    "elapsed_ms": 90,
+    "event": "sending",
+    "label": "ordinary-b",
+    "request_bytes": 1278
+  },
+  {
+    "elapsed_ms": 90,
+    "event": "sending",
+    "label": "ordinary-a",
+    "request_bytes": 1278
+  },
+  {
+    "body_bytes": 510,
+    "elapsed_ms": 2449,
+    "event": "received",
+    "http_status": 200,
+    "label": "ordinary-a",
+    "reported_code": null,
+    "reported_id": "930038478",
+    "reported_number": "CTEST-2026-28"
+  },
+  {
+    "body_bytes": 510,
+    "elapsed_ms": 2537,
+    "event": "received",
+    "http_status": 200,
+    "label": "ordinary-b",
+    "reported_code": null,
+    "reported_id": "930038478",
+    "reported_number": "CTEST-2026-28"
+  },
+  {
+    "elapsed_ms": 2538,
+    "event": "issued",
+    "id": 930038478,
+    "label": "ordinary",
+    "number": "CTEST-2026-28",
+    "side": "a"
+  },
+  {
+    "elapsed_ms": 2538,
+    "event": "issued",
+    "id": 930038478,
+    "label": "ordinary",
+    "number": "CTEST-2026-28",
+    "side": "b"
+  },
+  {
+    "distinct_reported_numbers": [
+      "CTEST-2026-28"
+    ],
+    "elapsed_ms": 2538,
+    "errors": [],
+    "event": "pair_result",
+    "label": "ordinary"
+  },
+  {
+    "elapsed_ms": 2539,
+    "event": "sending",
+    "label": "ordinary-by-number",
+    "request_bytes": 444
+  },
+  {
+    "body_bytes": 3174,
+    "elapsed_ms": 3019,
+    "event": "received",
+    "http_status": 200,
+    "label": "ordinary-by-number",
+    "reported_code": null,
+    "reported_id": "930038478",
+    "reported_number": "CTEST-2026-28"
+  },
+  {
+    "base": null,
+    "document_type": "SZ",
+    "elapsed_ms": 3021,
+    "event": "document",
+    "gross": "1270",
+    "id": 930038478,
+    "label": "ordinary-by-number",
+    "net": "1000",
+    "number": "CTEST-2026-28",
+    "order": "vp-61e35a2ff49343629c06e98ae112e7bb",
+    "reversed": null,
+    "test": true
+  },
+  {
+    "elapsed_ms": 3022,
+    "event": "sending",
+    "label": "ordinary-by-external-id",
+    "request_bytes": 501
+  },
+  {
+    "body_bytes": 3174,
+    "elapsed_ms": 3139,
+    "event": "received",
+    "http_status": 200,
+    "label": "ordinary-by-external-id",
+    "reported_code": null,
+    "reported_id": "930038478",
+    "reported_number": "CTEST-2026-28"
+  },
+  {
+    "base": null,
+    "document_type": "SZ",
+    "elapsed_ms": 3141,
+    "event": "document",
+    "gross": "1270",
+    "id": 930038478,
+    "label": "ordinary-by-external-id",
+    "net": "1000",
+    "number": "CTEST-2026-28",
+    "order": "vp-61e35a2ff49343629c06e98ae112e7bb",
+    "reversed": null,
+    "test": true
+  },
+  {
+    "elapsed_ms": 3141,
+    "event": "sending",
+    "label": "cleanup-original",
+    "request_bytes": 444
+  },
+  {
+    "body_bytes": 3174,
+    "elapsed_ms": 3243,
+    "event": "received",
+    "http_status": 200,
+    "label": "cleanup-original",
+    "reported_code": null,
+    "reported_id": "930038478",
+    "reported_number": "CTEST-2026-28"
+  },
+  {
+    "base": null,
+    "document_type": "SZ",
+    "elapsed_ms": 3245,
+    "event": "document",
+    "gross": "1270",
+    "id": 930038478,
+    "label": "cleanup-original",
+    "net": "1000",
+    "number": "CTEST-2026-28",
+    "order": "vp-61e35a2ff49343629c06e98ae112e7bb",
+    "reversed": null,
+    "test": true
+  },
+  {
+    "elapsed_ms": 3245,
+    "event": "cleanup_intent",
+    "number": "CTEST-2026-28"
+  },
+  {
+    "elapsed_ms": 3245,
+    "event": "sending",
+    "label": "cleanup-storno",
+    "request_bytes": 649
+  },
+  {
+    "body_bytes": 513,
+    "elapsed_ms": 5679,
+    "event": "received",
+    "http_status": 200,
+    "label": "cleanup-storno",
+    "reported_code": null,
+    "reported_id": "930038494",
+    "reported_number": "CTEST-2026-29"
+  },
+  {
+    "elapsed_ms": 5680,
+    "event": "sending",
+    "label": "cleanup-reversal",
+    "request_bytes": 444
+  },
+  {
+    "body_bytes": 3237,
+    "elapsed_ms": 5818,
+    "event": "received",
+    "http_status": 200,
+    "label": "cleanup-reversal",
+    "reported_code": null,
+    "reported_id": "930038494",
+    "reported_number": "CTEST-2026-29"
+  },
+  {
+    "base": "CTEST-2026-28",
+    "document_type": "SS",
+    "elapsed_ms": 5820,
+    "event": "document",
+    "gross": "-1270",
+    "id": 930038494,
+    "label": "cleanup-reversal",
+    "net": "-1000",
+    "number": "CTEST-2026-29",
+    "order": "vp-61e35a2ff49343629c06e98ae112e7bb",
+    "reversed": null,
+    "test": true
+  },
+  {
+    "elapsed_ms": 5820,
+    "event": "sending",
+    "label": "cleanup-refreshed-original",
+    "request_bytes": 444
+  },
+  {
+    "body_bytes": 3222,
+    "elapsed_ms": 5933,
+    "event": "received",
+    "http_status": 200,
+    "label": "cleanup-refreshed-original",
+    "reported_code": null,
+    "reported_id": "930038478",
+    "reported_number": "CTEST-2026-28"
+  },
+  {
+    "base": null,
+    "document_type": "SZ",
+    "elapsed_ms": 5935,
+    "event": "document",
+    "gross": "1270",
+    "id": 930038478,
+    "label": "cleanup-refreshed-original",
+    "net": "1000",
+    "number": "CTEST-2026-28",
+    "order": "vp-61e35a2ff49343629c06e98ae112e7bb",
+    "reversed": true,
+    "test": true
+  },
+  {
+    "elapsed_ms": 5936,
+    "event": "cleanup_verified",
+    "number": "CTEST-2026-28",
+    "storno": "CTEST-2026-29"
+  },
+  {
+    "elapsed_ms": 5936,
+    "event": "base_intent",
+    "external_id": "vendor-prototype:vb-61e35a2ff49343629c06e98ae112e7bb:invoice",
+    "order": "vb-61e35a2ff49343629c06e98ae112e7bb"
+  },
+  {
+    "elapsed_ms": 5937,
+    "event": "sending",
+    "label": "base-create",
+    "request_bytes": 1278
+  },
+  {
+    "body_bytes": 510,
+    "elapsed_ms": 7577,
+    "event": "received",
+    "http_status": 200,
+    "label": "base-create",
+    "reported_code": null,
+    "reported_id": "930038520",
+    "reported_number": "CTEST-2026-30"
+  },
+  {
+    "elapsed_ms": 7578,
+    "event": "base_issued",
+    "number": "CTEST-2026-30"
+  },
+  {
+    "elapsed_ms": 7578,
+    "event": "sending",
+    "label": "base-by-number",
+    "request_bytes": 444
+  },
+  {
+    "body_bytes": 3174,
+    "elapsed_ms": 7663,
+    "event": "received",
+    "http_status": 200,
+    "label": "base-by-number",
+    "reported_code": null,
+    "reported_id": "930038520",
+    "reported_number": "CTEST-2026-30"
+  },
+  {
+    "base": null,
+    "document_type": "SZ",
+    "elapsed_ms": 7664,
+    "event": "document",
+    "gross": "1270",
+    "id": 930038520,
+    "label": "base-by-number",
+    "net": "1000",
+    "number": "CTEST-2026-30",
+    "order": "vb-61e35a2ff49343629c06e98ae112e7bb",
+    "reversed": null,
+    "test": true
+  },
+  {
+    "elapsed_ms": 7720,
+    "event": "pair_intent",
+    "external_id": "vendor-prototype:vb-61e35a2ff49343629c06e98ae112e7bb:corrective:c1",
+    "independent_sessions": true,
+    "label": "corrective",
+    "order": "vb-61e35a2ff49343629c06e98ae112e7bb",
+    "planned_sends": 2
+  },
+  {
+    "elapsed_ms": 7721,
+    "event": "sending",
+    "label": "corrective-b",
+    "request_bytes": 1387
+  },
+  {
+    "elapsed_ms": 7722,
+    "event": "sending",
+    "label": "corrective-a",
+    "request_bytes": 1387
+  },
+  {
+    "body_bytes": 510,
+    "elapsed_ms": 10238,
+    "event": "received",
+    "http_status": 200,
+    "label": "corrective-b",
+    "reported_code": null,
+    "reported_id": "930038529",
+    "reported_number": "CTEST-2026-31"
+  },
+  {
+    "body_bytes": 510,
+    "elapsed_ms": 12450,
+    "event": "received",
+    "http_status": 200,
+    "label": "corrective-a",
+    "reported_code": null,
+    "reported_id": "930038532",
+    "reported_number": "CTEST-2026-32"
+  },
+  {
+    "elapsed_ms": 12451,
+    "event": "issued",
+    "id": 930038532,
+    "label": "corrective",
+    "number": "CTEST-2026-32",
+    "side": "a"
+  },
+  {
+    "elapsed_ms": 12451,
+    "event": "issued",
+    "id": 930038529,
+    "label": "corrective",
+    "number": "CTEST-2026-31",
+    "side": "b"
+  },
+  {
+    "distinct_reported_numbers": [
+      "CTEST-2026-31",
+      "CTEST-2026-32"
+    ],
+    "elapsed_ms": 12452,
+    "errors": [],
+    "event": "pair_result",
+    "label": "corrective"
+  },
+  {
+    "elapsed_ms": 12452,
+    "event": "sending",
+    "label": "corrective-by-number",
+    "request_bytes": 444
+  },
+  {
+    "body_bytes": 3227,
+    "elapsed_ms": 12590,
+    "event": "received",
+    "http_status": 200,
+    "label": "corrective-by-number",
+    "reported_code": null,
+    "reported_id": "930038529",
+    "reported_number": "CTEST-2026-31"
+  },
+  {
+    "base": "CTEST-2026-30",
+    "document_type": "HS",
+    "elapsed_ms": 12592,
+    "event": "document",
+    "gross": "1270",
+    "id": 930038529,
+    "label": "corrective-by-number",
+    "net": "1000",
+    "number": "CTEST-2026-31",
+    "order": "vb-61e35a2ff49343629c06e98ae112e7bb",
+    "reversed": null,
+    "test": true
+  },
+  {
+    "elapsed_ms": 12593,
+    "event": "sending",
+    "label": "corrective-by-number",
+    "request_bytes": 444
+  },
+  {
+    "body_bytes": 3227,
+    "elapsed_ms": 12693,
+    "event": "received",
+    "http_status": 200,
+    "label": "corrective-by-number",
+    "reported_code": null,
+    "reported_id": "930038532",
+    "reported_number": "CTEST-2026-32"
+  },
+  {
+    "base": "CTEST-2026-30",
+    "document_type": "HS",
+    "elapsed_ms": 12695,
+    "event": "document",
+    "gross": "1270",
+    "id": 930038532,
+    "label": "corrective-by-number",
+    "net": "1000",
+    "number": "CTEST-2026-32",
+    "order": "vb-61e35a2ff49343629c06e98ae112e7bb",
+    "reversed": null,
+    "test": true
+  },
+  {
+    "elapsed_ms": 12696,
+    "event": "sending",
+    "label": "corrective-by-external-id",
+    "request_bytes": 507
+  },
+  {
+    "body_bytes": 3227,
+    "elapsed_ms": 12843,
+    "event": "received",
+    "http_status": 200,
+    "label": "corrective-by-external-id",
+    "reported_code": null,
+    "reported_id": "930038532",
+    "reported_number": "CTEST-2026-32"
+  },
+  {
+    "base": "CTEST-2026-30",
+    "document_type": "HS",
+    "elapsed_ms": 12845,
+    "event": "document",
+    "gross": "1270",
+    "id": 930038532,
+    "label": "corrective-by-external-id",
+    "net": "1000",
+    "number": "CTEST-2026-32",
+    "order": "vb-61e35a2ff49343629c06e98ae112e7bb",
+    "reversed": null,
+    "test": true
+  },
+  {
+    "elapsed_ms": 12846,
+    "event": "sending",
+    "label": "cleanup-original",
+    "request_bytes": 444
+  },
+  {
+    "body_bytes": 3227,
+    "elapsed_ms": 12954,
+    "event": "received",
+    "http_status": 200,
+    "label": "cleanup-original",
+    "reported_code": null,
+    "reported_id": "930038532",
+    "reported_number": "CTEST-2026-32"
+  },
+  {
+    "base": "CTEST-2026-30",
+    "document_type": "HS",
+    "elapsed_ms": 12956,
+    "event": "document",
+    "gross": "1270",
+    "id": 930038532,
+    "label": "cleanup-original",
+    "net": "1000",
+    "number": "CTEST-2026-32",
+    "order": "vb-61e35a2ff49343629c06e98ae112e7bb",
+    "reversed": null,
+    "test": true
+  },
+  {
+    "elapsed_ms": 12957,
+    "event": "cleanup_intent",
+    "number": "CTEST-2026-32"
+  },
+  {
+    "elapsed_ms": 12957,
+    "event": "sending",
+    "label": "cleanup-storno",
+    "request_bytes": 649
+  },
+  {
+    "body_bytes": 306,
+    "elapsed_ms": 13361,
+    "event": "received",
+    "http_status": 200,
+    "label": "cleanup-storno",
+    "reported_code": "13",
+    "reported_id": null,
+    "reported_number": null
+  },
+  {
+    "class": "Unknown",
+    "code": "13",
+    "elapsed_ms": 13361,
+    "event": "parsed_error",
+    "label": "cleanup-storno"
+  },
+  {
+    "elapsed_ms": 13362,
+    "event": "finish",
+    "result": {
+      "Err": "cleanup-storno: Unknown code=Some(\"13\")"
+    }
+  }
+]
