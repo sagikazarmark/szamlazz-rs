@@ -430,6 +430,11 @@ fn decode_marker(raw: &[u8], scope: Option<&str>, key: &str) -> Option<Unresolve
 fn valid_execution_contract(marker: &UnresolvedWrite) -> bool {
     use crate::contract::recovery::OrdinaryExecutionContract as Contract;
     use crate::identity::IssuedKind;
+    if marker.prepayment_number.is_some()
+        && marker.execution_contract != Some(Contract::RequestResponseFinalV1)
+    {
+        return false;
+    }
     match (&marker.execution_contract, &marker.operation) {
         (
             Some(Contract::RequestResponseOrdinaryV1),
@@ -438,7 +443,29 @@ fn valid_execution_contract(marker: &UnresolvedWrite) -> bool {
                 corrected_number: None,
                 ..
             },
+        )
+        | (
+            Some(Contract::RequestResponsePrepaymentV1),
+            WriteOperation::Create {
+                kind: IssuedKind::Prepayment,
+                corrected_number: None,
+                ..
+            },
         ) => true,
+        (
+            Some(Contract::RequestResponseFinalV1),
+            WriteOperation::Create {
+                kind: IssuedKind::Final,
+                corrected_number: None,
+                ..
+            },
+        ) => {
+            marker.proforma_number.is_none()
+                && marker
+                    .prepayment_number
+                    .as_ref()
+                    .is_some_and(|n| n.parse::<crate::contract::ProviderDocumentNumber>().is_ok())
+        }
         (
             Some(Contract::RequestResponseProformaV1),
             WriteOperation::Create {
@@ -480,6 +507,8 @@ impl Execution {
     ) -> Result<WriteResult, HandlerError> {
         let marker = UnresolvedWrite {
             execution_contract: Some(match request.operation() {
+                WriteOperation::Create {kind:crate::identity::IssuedKind::Prepayment,..} => crate::contract::recovery::OrdinaryExecutionContract::RequestResponsePrepaymentV1,
+                WriteOperation::Create {kind:crate::identity::IssuedKind::Final,..} => crate::contract::recovery::OrdinaryExecutionContract::RequestResponseFinalV1,
                 WriteOperation::Create {
                     kind: crate::identity::IssuedKind::Proforma,
                     ..
@@ -491,6 +520,7 @@ impl Execution {
                 }
             }),
             proforma_number: request.proforma_number().map(str::to_owned),
+            prepayment_number: request.prepayment_number().map(str::to_owned),
             version: MarkerVersion,
             token: ctx.invocation_id().to_owned(),
             owner_invocation: ctx.invocation_id().to_owned(),
@@ -513,6 +543,7 @@ impl Execution {
             move |gateway, marker| async move {
                 if marker.operation != request.operation()
                     || marker.proforma_number.as_deref() != request.proforma_number()
+                    || marker.prepayment_number.as_deref() != request.prepayment_number()
                 {
                     return WriteResult::unresolved(
                         "outbound request differs from retained issuance intent",
@@ -546,6 +577,7 @@ impl Execution {
         let marker = UnresolvedWrite {
             execution_contract: Some(contract),
             proforma_number: None,
+            prepayment_number: None,
             version: MarkerVersion,
             token: ctx.invocation_id().to_owned(),
             owner_invocation: ctx.invocation_id().to_owned(),
@@ -702,6 +734,7 @@ impl Execution {
         let marker = UnresolvedWrite {
             execution_contract: None,
             proforma_number: None,
+            prepayment_number: None,
             version: MarkerVersion,
             token: ctx.invocation_id().to_owned(),
             owner_invocation: ctx.invocation_id().to_owned(),

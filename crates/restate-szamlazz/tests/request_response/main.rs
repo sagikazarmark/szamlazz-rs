@@ -1,6 +1,7 @@
 //! Actual-service #247 experiment. Fake provider only; no live tests in this target.
 #![allow(missing_docs, clippy::too_many_lines)]
 
+mod chain;
 #[path = "../common/mod.rs"]
 mod common;
 mod extensions;
@@ -205,6 +206,8 @@ fn endpoint(provider: &str, lab: Arc<Lab>, worker: usize) -> Endpoint {
                     ServiceOptions::default()
                         .handler("create_invoice", policy.clone())
                         .handler("create_proforma", policy.clone())
+                        .handler("create_prepayment", policy.clone())
+                        .handler("create_final", policy.clone())
                         .handler("delete_proforma", policy),
                 ),
         )
@@ -343,12 +346,7 @@ async fn pause(server: &Restate, id: &str) {
 
 async fn admission_cases(server: &Restate, mock: &wiremock::MockServer, lab: &Arc<Lab>) {
     let before = mock.received_requests().await.expect("requests").len();
-    for handler in [
-        "create_prepayment",
-        "create_final",
-        "correct_invoice",
-        "storno_invoice",
-    ] {
+    for handler in ["correct_invoice", "storno_invoice"] {
         let response = server
             .invoke(
                 &Call::object("Szamlazz.Order", "unsupported", handler),
@@ -754,6 +752,10 @@ async fn e2e_request_response_actual_order() {
     assert_eq!(response.body["outcome"], "reconciled", "{response:?}");
     extensions::reissue(&server, &mock).await;
     proformas::create(&server, &mock).await;
+    chain::issue(&server, &mock).await;
+    chain::final_invoice(&server, &mock).await;
+    chain::interrupted(&server, &mock, &lab).await;
+    chain::reissue_and_recover(&server, &mock).await;
     proformas::delete(&server, &mock).await;
     proformas::guards(&server, &mock).await;
     proformas::interruptions(&server, &mock, &lab).await;

@@ -80,6 +80,8 @@ async fn serve(
             restate_sdk::endpoint::ServiceOptions::default()
                 .handler("create_invoice", policy.clone())
                 .handler("create_proforma", policy.clone())
+                .handler("create_prepayment", policy.clone())
+                .handler("create_final", policy.clone())
                 .handler("delete_proforma", policy),
         )
     };

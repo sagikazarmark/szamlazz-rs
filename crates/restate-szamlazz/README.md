@@ -27,8 +27,9 @@ are computed or validated against caller assertions, domain outcomes are returne
 
 An isolated **#247 RequestResponse experiment** is available behind `test-util`,
 explicitly selected on both services with `.experimental_request_response()`.
-It supports proforma creation and exact-target deletion, ordinary invoices including
-exact-target reissue and pinned proforma conversion, reads and evidence-carrying recovery; it requires operator-confirmed
+It supports proforma creation and exact-target deletion, ordinary/prepayment/final
+invoices including exact-target reissue and pinned references, reads and
+evidence-carrying recovery; it requires operator-confirmed
 provider duplicate-order checking, and accepts unfinished-run resubmission risk.
 Proforma deletion clears automatically only on an acknowledged deletion; a later
 absence/refusal or failed guard retains uncertainty. Named deletion keeps its exact
@@ -42,7 +43,7 @@ in workerd with signed/scoped Restate calls. It documents the interim SDK patch,
 shared reqwest transport and runtime checks. Production capability/settlement
 and migration approvals remain open; the table below describes the default services.
 
-The recovery marker now carries optional `execution_contract` and `proforma_number`
+The recovery marker now carries optional `execution_contract`, `proforma_number` and `prepayment_number`
 fields. Existing JSON markers remain decodable; Rust code constructing
 `UnresolvedWrite` literals supplies `None` for legacy markers. Recovery requires
 the exact observed JSON, including omitted versus null members. The observation

@@ -205,6 +205,30 @@ shared prepare-result wrapper validates contract/operation pairing; replay also
 compares the pinned contract before executing. Legacy journals gain no send
 permission. This extends the operation subset, not production migration approval.
 
+### Prepayment/final extension (agreed)
+
+The user approved shared prepayment/final RequestResponse issuance, including
+exact-target reissue. References are selected once from completed prerequisites;
+prepayment retains its proforma choice, final retains its exact prepayment number.
+Executing open runs discover the requested target first. Positive target evidence
+settles issuance even if the proforma was consumed or prepayment subsequently
+reversed. Without target evidence, fresh chain exclusivity and pinned-reference
+checks must pass before resubmission. An absent/reversed/changed prerequisite after
+admission retains uncertainty, never permission to substitute another chain.
+Recorded uncertainty stays read-only and exact-marker recovery remains shared.
+
+Provider per-type duplicate-order checking is a prerequisite for these operations;
+the ordinary-invoice concurrency observation is not proof of their atomic behavior.
+Success means issuance, not independently verified linkage or allocation. Final
+deduction lines remain caller-owned; linking a prepayment does not net the totals.
+
+Markers carry distinct `request_response_prepayment_v1` / `request_response_final_v1`
+contracts and final's `prepayment_number`. Known final markers require that reference,
+other contracts cannot carry it. Exact echoes retain member presence. Previous
+markers remain readable; older deployments reject these extensions. Existing
+ordinary/proforma step sequences are unchanged. Production rollout/migration and
+other mutation types remain outside this extension.
+
 ### Host and transport behavior
 
 The [workers-rs example](../../examples/workers/README.md) now builds and runs the

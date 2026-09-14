@@ -423,6 +423,17 @@ pub enum CreateStepRequestError {
 
 impl<'a> CreateStepRequest<'a> {
     #[cfg(feature = "test-util")]
+    pub(crate) fn prepayment_number(&self) -> Option<&str> {
+        match &self.create.kind {
+            szamlazz_agent::ops::invoice::InvoiceKind::Final {
+                prepayment_number, ..
+            } => prepayment_number
+                .as_ref()
+                .map(szamlazz_agent::InvoiceNumber::as_str),
+            _ => None,
+        }
+    }
+    #[cfg(feature = "test-util")]
     pub(crate) fn proforma_number(&self) -> Option<&str> {
         self.create
             .kind

@@ -87,6 +87,9 @@ pub struct UnresolvedWrite {
     /// means no explicit link; recovery establishes issuance, not linkage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proforma_number: Option<String>,
+    /// Exact prepayment selected for final issuance; never substituted on replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepayment_number: Option<String>,
     /// Explicit state schema version.
     pub version: MarkerVersion,
     /// Unique marker token, the original invocation id.
@@ -130,6 +133,12 @@ pub enum OrdinaryExecutionContract {
     /// Proforma issuance with fresh invoice-family guards on unfinished replay.
     #[serde(rename = "request_response_proforma_v1")]
     RequestResponseProformaV1,
+    /// Prepayment issuance with pinned proforma and fresh exclusivity checks.
+    #[serde(rename = "request_response_prepayment_v1")]
+    RequestResponsePrepaymentV1,
+    /// Final issuance with a pinned prepayment prerequisite.
+    #[serde(rename = "request_response_final_v1")]
+    RequestResponseFinalV1,
     /// Exact-target deletion; only an acknowledged deletion clears automatically.
     #[serde(rename = "request_response_delete_v1")]
     RequestResponseDeleteV1 {
@@ -157,6 +166,12 @@ impl<'de> Deserialize<'de> for OrdinaryExecutionContract {
                     }
                     "request_response_proforma_v1" => {
                         Ok(OrdinaryExecutionContract::RequestResponseProformaV1)
+                    }
+                    "request_response_prepayment_v1" => {
+                        Ok(OrdinaryExecutionContract::RequestResponsePrepaymentV1)
+                    }
+                    "request_response_final_v1" => {
+                        Ok(OrdinaryExecutionContract::RequestResponseFinalV1)
                     }
                     _ => Err(E::custom("unknown execution contract")),
                 }

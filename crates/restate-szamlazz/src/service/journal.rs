@@ -159,6 +159,7 @@ fn entries() -> Vec<Entry> {
     let marker = UnresolvedWrite {
         execution_contract: None,
         proforma_number: None,
+        prepayment_number: None,
         version: MarkerVersion,
         token: "inv-owner".into(),
         owner_invocation: "inv-owner".into(),
@@ -177,6 +178,24 @@ fn entries() -> Vec<Entry> {
         },
     };
     all.extend(entries_of(vec![()], &single()));
+    let mut prepayment = marker.clone();
+    prepayment.execution_contract =
+        Some(crate::contract::recovery::OrdinaryExecutionContract::RequestResponsePrepaymentV1);
+    prepayment.proforma_number = Some("D-CHAIN".into());
+    prepayment.operation = WriteOperation::Create {
+        kind: crate::identity::IssuedKind::Prepayment,
+        expected_number: None,
+        corrected_number: None,
+    };
+    let mut final_invoice = marker.clone();
+    final_invoice.execution_contract =
+        Some(crate::contract::recovery::OrdinaryExecutionContract::RequestResponseFinalV1);
+    final_invoice.prepayment_number = Some("ES-CHAIN".into());
+    final_invoice.operation = WriteOperation::Create {
+        kind: crate::identity::IssuedKind::Final,
+        expected_number: Some("VS-OLD".into()),
+        corrected_number: None,
+    };
     let mut proforma = marker.clone();
     proforma.execution_contract =
         Some(crate::contract::recovery::OrdinaryExecutionContract::RequestResponseProformaV1);
@@ -199,12 +218,17 @@ fn entries() -> Vec<Entry> {
     all.extend(entries_of(
         vec![
             super::recovery::OrdinaryIntent::new(marker.clone()),
+            super::recovery::OrdinaryIntent::new(prepayment.clone()),
+            super::recovery::OrdinaryIntent::new(final_invoice.clone()),
             super::recovery::OrdinaryIntent::new(proforma.clone()),
             super::recovery::OrdinaryIntent::new(deletion.clone()),
         ],
         &single(),
     ));
-    all.extend(entries_of(vec![marker, proforma, deletion], &single()));
+    all.extend(entries_of(
+        vec![marker, proforma, deletion, prepayment, final_invoice],
+        &single(),
+    ));
     all.extend(entries_of(
         vec![RecoveryResponse {
             token: "inv-owner".into(),

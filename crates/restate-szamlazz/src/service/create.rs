@@ -612,6 +612,21 @@ impl Execution {
         {
             return Ok(response);
         }
+        #[cfg(feature = "test-util")]
+        if self.experimental_request_response
+            && kind == DocumentKind::Final
+            && let Some(response) = self
+                .exclusivity(
+                    ctx,
+                    &prepared,
+                    &identity,
+                    DocumentKind::Invoice,
+                    ConflictReason::PrepaidChain,
+                )
+                .await?
+        {
+            return Ok(response);
+        }
 
         // Step 2: the proforma link, on the kinds that convert a proforma
         // (`links_proforma`): the invoice and the prepayment invoice.
@@ -625,7 +640,7 @@ impl Execution {
 
         #[cfg(feature = "test-util")]
         if self.experimental_request_response
-            && matches!(prepared.proforma, ProformaLink::Number(_))
+            && (kind == DocumentKind::Final || matches!(prepared.proforma, ProformaLink::Number(_)))
         {
             let slot = ExternalId::for_kind(
                 &self.config.namespace,

@@ -208,8 +208,10 @@ impl Gateway {
     {
         use crate::identity::{DocumentKind, IssuedKind};
         // Defence in depth: this seam is never a blanket permission for kinds.
-        if !matches!(request.kind, IssuedKind::Invoice | IssuedKind::Proforma)
-            || request.corrected_number.is_some()
+        if !matches!(
+            request.kind,
+            IssuedKind::Invoice | IssuedKind::Proforma | IssuedKind::Prepayment | IssuedKind::Final
+        ) || request.corrected_number.is_some()
         {
             return WriteResult::unresolved("unsupported experimental ordinary intent");
         }
@@ -247,11 +249,27 @@ impl Gateway {
             return WriteResult::unresolved("invalid ordinary namespace");
         };
         let proforma = request.proforma_number();
+        let prepayment = request.prepayment_number();
+        if request.kind == IssuedKind::Final && prepayment.is_none() {
+            return WriteResult::unresolved("final issuance requires pinned prepayment");
+        }
         let guarded = if request.kind == IssuedKind::Proforma {
             [
                 DocumentKind::Invoice,
                 DocumentKind::Prepayment,
                 DocumentKind::Final,
+            ]
+        } else if request.kind == IssuedKind::Final {
+            [
+                DocumentKind::Invoice,
+                DocumentKind::Prepayment,
+                DocumentKind::Proforma,
+            ]
+        } else if request.kind == IssuedKind::Prepayment {
+            [
+                DocumentKind::Invoice,
+                DocumentKind::Final,
+                DocumentKind::Proforma,
             ]
         } else {
             [
@@ -263,6 +281,15 @@ impl Gateway {
         for kind in guarded {
             let id = ExternalId::for_kind(&namespace, request.order, kind);
             match self.lookup_ours(&id, request.order, kind.into()).await {
+                Ok(super::OwnershipOutcome::Live(found))
+                    if kind == DocumentKind::Prepayment
+                        && request.kind == IssuedKind::Final
+                        && prepayment == Some(found.number.as_str()) => {}
+                Ok(super::OwnershipOutcome::Absent | super::OwnershipOutcome::Reversed(_))
+                    if kind == DocumentKind::Prepayment && request.kind == IssuedKind::Final =>
+                {
+                    return WriteResult::unresolved("pinned prepayment absent or reversed");
+                }
                 Ok(super::OwnershipOutcome::Absent | super::OwnershipOutcome::Reversed(_)) => {}
                 Ok(super::OwnershipOutcome::Live(found))
                     if kind == DocumentKind::Proforma
@@ -278,6 +305,24 @@ impl Gateway {
                     return WriteResult::unresolved(format!(
                         "fresh {kind} guard did not permit ordinary issuance"
                     ));
+                }
+            }
+        }
+        if let Some(number) = prepayment {
+            match self.verify(number).await {
+                Ok(super::QueryOutcome::Found(found))
+                    if found.is_ours(request.order, IssuedKind::Prepayment) && found.is_live() => {}
+                Ok(super::QueryOutcome::CredentialsRejected(answer)) => {
+                    answer.warn_credentials_rejected(request.external_id.namespace());
+                    return WriteResult::unresolved(format!(
+                        "prepayment credentials rejected: {}",
+                        answer.code
+                    ));
+                }
+                _ => {
+                    return WriteResult::unresolved(
+                        "pinned prepayment no longer live on this Order",
+                    );
                 }
             }
         }
@@ -312,9 +357,11 @@ impl Gateway {
                 ));
             }
             Ok(found)
-                if (found.document_type == szamlazz_agent::DocumentType::Proforma
-                    && proforma == Some(found.number.as_str())
-                    && found.carries_order(request.order))
+                if (prepayment == Some(found.number.as_str())
+                    && found.is_ours(request.order, IssuedKind::Prepayment))
+                    || (found.document_type == szamlazz_agent::DocumentType::Proforma
+                        && proforma == Some(found.number.as_str())
+                        && found.carries_order(request.order))
                     || !found.is_live()
                     || (!found.is_invoice_family()
                         && found.document_type != szamlazz_agent::DocumentType::Proforma) => {}
@@ -801,6 +848,7 @@ mod tests {
             let gateway = open_gateway(account, Credentials::agent_key("key"));
             let id = ExternalId::new("acct:ORD-1:storno:SZ-1");
             let marker = UnresolvedWrite {
+                prepayment_number: None,
                 execution_contract: None,
                 proforma_number: None,
                 version: MarkerVersion,
@@ -949,6 +997,7 @@ mod tests {
             let gateway = open_gateway(account, Credentials::agent_key("PRIVATE-KEY"));
             let external_id = ExternalId::new("acct:ORD-1:storno:SZ-1");
             let marker = UnresolvedWrite {
+                prepayment_number: None,
                 execution_contract: None,
                 proforma_number: None,
                 version: MarkerVersion,
@@ -1186,6 +1235,7 @@ mod tests {
             account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
             let gateway = open_gateway(account, Credentials::agent_key("PRIVATE-KEY"));
             let marker = UnresolvedWrite {
+                prepayment_number: None,
                 execution_contract: None,
                 proforma_number: None,
                 version: MarkerVersion,
@@ -1259,6 +1309,7 @@ mod tests {
         let gateway = open_gateway(account, Credentials::agent_key("PRIVATE-KEY"));
         let external_id = ExternalId::new("acct:ORD-1:storno:SZ-1");
         let marker = UnresolvedWrite {
+            prepayment_number: None,
             execution_contract: None,
             proforma_number: None,
             version: MarkerVersion,
@@ -1326,6 +1377,7 @@ mod tests {
         let gateway = open_gateway(account, Credentials::agent_key("PRIVATE-KEY"));
         let external_id = ExternalId::new("acct:ORD-1:storno:SZ-1");
         let marker = UnresolvedWrite {
+            prepayment_number: None,
             execution_contract: None,
             proforma_number: None,
             version: MarkerVersion,

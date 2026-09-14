@@ -432,12 +432,7 @@ async fn e2e_workers_signed_scoped_ordinary() {
         "unresolved"
     );
     let before = mock.received_requests().await.expect("requests").len();
-    for handler in [
-        "create_prepayment",
-        "create_final",
-        "correct_invoice",
-        "storno_invoice",
-    ] {
+    for handler in ["correct_invoice", "storno_invoice"] {
         let response = server
             .invoke(
                 &Call::object("Szamlazz.Order", "BLOCKED", handler).scoped("alpha"),
@@ -666,8 +661,240 @@ async fn e2e_workers_signed_scoped_ordinary() {
     assert_eq!(query.body["by_vat_rate"][0]["vat_type"], "AAM");
     mock.verify().await;
     proforma_lifecycle(&server, &mock, uri).await;
+    chain_lifecycle(&server, &mock, uri).await;
+    chain_resubmission(&server, &mock, uri).await;
     server.finish().await;
     host.finish();
+}
+
+async fn chain_resubmission(
+    server: &restate_e2e_harness::Restate,
+    mock: &wiremock::MockServer,
+    uri: &str,
+) {
+    for (key, handler) in [
+        ("ES-RESEND", "create_prepayment"),
+        ("VS-RESEND", "create_final"),
+    ] {
+        if handler == "create_final" {
+            common::external_id_query("workers:VS-RESEND:prepayment")
+                .respond_with(common::Doc::of("ES-PINNED", "ES", key).response())
+                .with_priority(1)
+                .mount(mock)
+                .await;
+            common::number_query("ES-PINNED")
+                .respond_with(common::Doc::of("ES-PINNED", "ES", key).response())
+                .with_priority(1)
+                .mount(mock)
+                .await;
+        }
+        let sends = Arc::new(AtomicUsize::new(0));
+        let count = sends.clone();
+        common::create_for(key)
+            .respond_with(move |req: &wiremock::Request| {
+                if handler == "create_final" {
+                    assert!(
+                        String::from_utf8_lossy(&req.body)
+                            .contains("<elolegSzamlaszam>ES-PINNED</elolegSzamlaszam>")
+                    );
+                }
+                let reply = common::created("CHAIN-RESUBMITTED", "1000", "1270");
+                if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    reply.set_delay(Duration::from_secs(20))
+                } else {
+                    reply
+                }
+            })
+            .expect(2)
+            .mount(mock)
+            .await;
+        let mut body = request();
+        body["options"] = json!({});
+        let call = Call::object("Szamlazz.Order", key, handler).scoped("alpha");
+        let started = server.invoke(&call.send(), Some(&body), Some(key)).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while sends.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("first chain send");
+        common::http_client()
+            .post(format!("{uri}/__interrupt"))
+            .send()
+            .await
+            .expect("interrupt")
+            .error_for_status()
+            .expect("interrupted");
+        server
+            .admin()
+            .await_status(started.invocation_id(), &["completed"])
+            .await;
+        let response = server.invoke(&call, Some(&body), Some(key)).await;
+        assert_eq!(response.body["outcome"], "issued", "{response:?}");
+        assert_eq!(sends.load(Ordering::SeqCst), 2);
+    }
+    mock.verify().await;
+}
+
+async fn chain_lifecycle(
+    server: &restate_e2e_harness::Restate,
+    mock: &wiremock::MockServer,
+    uri: &str,
+) {
+    let prepayment_created = Arc::new(AtomicBool::new(false));
+    let final_sent = Arc::new(AtomicBool::new(false));
+    let issued = prepayment_created.clone();
+    common::external_id_query("workers:CHAIN:proforma")
+        .respond_with(move |_: &wiremock::Request| {
+            if issued.load(Ordering::SeqCst) {
+                common::not_found()
+            } else {
+                common::Doc::of("D-CHAIN", "D", "CHAIN").response()
+            }
+        })
+        .with_priority(1)
+        .mount(mock)
+        .await;
+    common::number_query("D-CHAIN")
+        .respond_with(common::Doc::of("D-CHAIN", "D", "CHAIN").response())
+        .with_priority(1)
+        .mount(mock)
+        .await;
+    let issued = prepayment_created.clone();
+    let sent = final_sent.clone();
+    common::external_id_query("workers:CHAIN:prepayment")
+        .respond_with(move |_: &wiremock::Request| {
+            if !issued.load(Ordering::SeqCst) {
+                return common::not_found();
+            }
+            let mut doc = common::Doc::of("ES-WORKER", "ES", "CHAIN");
+            doc.reversed = sent.load(Ordering::SeqCst);
+            doc.response()
+        })
+        .with_priority(1)
+        .mount(mock)
+        .await;
+    let sent = final_sent.clone();
+    common::number_query("ES-WORKER")
+        .respond_with(move |_: &wiremock::Request| {
+            let mut doc = common::Doc::of("ES-WORKER", "ES", "CHAIN");
+            doc.reversed = sent.load(Ordering::SeqCst);
+            doc.response()
+        })
+        .with_priority(1)
+        .mount(mock)
+        .await;
+    let issued = prepayment_created.clone();
+    common::create_for("CHAIN")
+        .and(wiremock::matchers::body_string_contains(
+            "<elolegszamla>true</elolegszamla>",
+        ))
+        .respond_with(move |req: &wiremock::Request| {
+            assert!(
+                String::from_utf8_lossy(&req.body)
+                    .contains("<dijbekeroSzamlaszam>D-CHAIN</dijbekeroSzamlaszam>")
+            );
+            issued.store(true, Ordering::SeqCst);
+            common::created("ES-WORKER", "1000", "1270")
+        })
+        .expect(1)
+        .mount(mock)
+        .await;
+    let mut body = request();
+    body["options"] = json!({});
+    let prepayment = server
+        .invoke(
+            &Call::object("Szamlazz.Order", "CHAIN", "create_prepayment").scoped("alpha"),
+            Some(&body),
+            None,
+        )
+        .await;
+    assert_eq!(prepayment.body["outcome"], "issued", "{prepayment:?}");
+    let sent = final_sent.clone();
+    common::create_for("CHAIN")
+        .and(wiremock::matchers::body_string_contains(
+            "<vegszamla>true</vegszamla>",
+        ))
+        .respond_with(move |req: &wiremock::Request| {
+            assert!(
+                String::from_utf8_lossy(&req.body)
+                    .contains("<elolegSzamlaszam>ES-WORKER</elolegSzamlaszam>")
+            );
+            sent.store(true, Ordering::SeqCst);
+            common::created("VS-WORKER", "500", "635").set_delay(Duration::from_secs(20))
+        })
+        .expect(1)
+        .mount(mock)
+        .await;
+    let visible = Arc::new(AtomicBool::new(false));
+    let shown = visible.clone();
+    common::external_id_query("workers:CHAIN:final")
+        .respond_with(move |_: &wiremock::Request| {
+            if shown.load(Ordering::SeqCst) {
+                common::Doc::of("VS-WORKER", "VS", "CHAIN").response()
+            } else {
+                common::not_found()
+            }
+        })
+        .with_priority(1)
+        .mount(mock)
+        .await;
+    body["document"]["items"][0]["unit_price"] = json!("1500");
+    body["document"]["items"].as_array_mut().expect("items").push(json!({"name":"Deduct prepayment","quantity":"1","unit":"db","unit_price":"-1000","vat_rate":"27"}));
+    let call = Call::object("Szamlazz.Order", "CHAIN", "create_final").scoped("alpha");
+    let started = server
+        .invoke(&call.send(), Some(&body), Some("chain-final"))
+        .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !final_sent.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("final send");
+    common::http_client()
+        .post(format!("{uri}/__interrupt"))
+        .send()
+        .await
+        .expect("interrupt")
+        .error_for_status()
+        .expect("interrupt status");
+    server
+        .admin()
+        .await_status(started.invocation_id(), &["paused"])
+        .await;
+    let observation = server
+        .invoke(
+            &Call::object("Szamlazz.Order", "CHAIN", "observe_unresolved").scoped("alpha"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(observation.body["marker"]["prepayment_number"], "ES-WORKER");
+    assert_eq!(
+        observation.body["marker"]["execution_contract"],
+        "request_response_final_v1"
+    );
+    server.admin().resume(started.invocation_id()).await;
+    server
+        .admin()
+        .await_status(started.invocation_id(), &["paused"])
+        .await;
+    visible.store(true, Ordering::SeqCst);
+    server.admin().resume(started.invocation_id()).await;
+    server
+        .admin()
+        .await_status(started.invocation_id(), &["completed"])
+        .await;
+    assert_eq!(
+        server
+            .invoke(&call, Some(&body), Some("chain-final"))
+            .await
+            .body["outcome"],
+        "reconciled"
+    );
+    mock.verify().await;
 }
 
 async fn proforma_lifecycle(

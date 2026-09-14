@@ -1,5 +1,10 @@
 # Actual Order RequestResponse experiment (#247)
 
+The prepayment/final extension tests pinned proforma/prepayment references, explicit
+final deduction lines, missing/reversed/replaced prerequisites after interruption,
+positive target evidence despite changed prerequisites, recorded uncertainty,
+old-number reissue echoes and exact-marker recovery.
+
 The proforma lifecycle extension covers create/delete through the same Order,
 including interrupted visible/invisible creates, invoice-family guard changes,
 paid/force and named deletion, interrupted deletion with an absent or still-present

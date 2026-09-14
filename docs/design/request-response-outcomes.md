@@ -40,6 +40,35 @@ below.
 
 ## Admission and support
 
+### Prepayment/final extension (agreed)
+
+The same experimental handlers now permit prepayment and final issuance, including
+exact-target reissue. The account's per-type duplicate-order checking is required;
+ordinary-invoice overlap observations are not evidence of atomic deduplication for
+these types. Unfinished executions may resubmit only after fresh target and chain
+checks. Recorded uncertainty remains read-only; elapsed time, kill and cancellation
+never authorize another send.
+
+Prepayment keeps its selected proforma (or no link) and refreshes ordinary/final
+exclusivity plus proforma guards. Final keeps the exact selected prepayment number;
+after target discovery, every executing send requires that same live owned
+prepayment under the chain's external id and by number, and refuses a live ordinary
+invoice or unexpected proforma. The order hint may name the pinned prepayment,
+never another live invoice-family document. Missing, reversed, colliding or replaced
+prerequisites after admission retain uncertainty without sending. A changed
+prerequisite before admission keeps existing prerequisite conflicts.
+
+Positive matching target evidence takes precedence: a visible prepayment/final
+invoice settles issuance even if its proforma was consumed or its prepayment later
+reversed. Success establishes issuance, not independently verified linkage or
+monetary allocation. Caller-supplied negative prepayment deduction lines remain
+necessary on a final invoice; the provider does not net the reference into totals.
+Expected reissue numbers and pinned references never change on replay. Markers
+retain the prepayment reference separately from the proforma reference and use
+distinct execution-contract tokens. Known markers remain recoverable through the
+same exact-echo, pinned-account interface. Other mutation types and production
+migration approval remain outside this extension.
+
 ### Proforma creation and deletion extension (agreed)
 
 The user accepts unfinished-run replay for proforma create/delete, on both hosts
@@ -71,7 +100,8 @@ results never grant permission for the new operation. Other mutation types remai
 outside this extension.
 
 The explicit `test-util` opt-in on **both** Order and Agent is for an isolated
-experimental endpoint. It permits `create_proforma`, exact-target `delete_proforma`, ordinary `Order.create_invoice` including reissue
+experimental endpoint. It permits all four create handlers (proforma, ordinary,
+prepayment, final), exact-target `delete_proforma`, including supported reissue
 and pinned conversion, evidence-carrying `recover`, and reads (`get`,
 `observe_unresolved`, Agent `query`, `query_taxpayer`, `check_account`). All other
 mutations return the existing `invalid_input` fault before provider I/O.
