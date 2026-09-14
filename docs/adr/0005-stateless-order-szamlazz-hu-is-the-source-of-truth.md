@@ -1,4 +1,11 @@
-# `Szamlazz.Order` keeps no state: szamlazz.hu is the source of truth, reached through deterministic external ids
+# `Szamlazz.Order` keeps uncertainty only: szamlazz.hu is the document source of truth
+
+**2026-09-14 qualification ([ADR 0018](0018-retained-order-execution-and-evidence-boundaries.md)):**
+one Order is one billing unit, not an arbitrary split-billing/installment aggregate. Permanent external ids
+remain, with **newest-holder/non-regression accepted as an assumption, not a provider guarantee**. Recorded
+test-account queries do not establish monotonicity through failure/recovery. A historical holder could falsely
+settle a later uncertain reissue; ADR 0018 records the exact counterexample, source evidence and operator action.
+The unresolved-write marker remains the sole state; no document history or generation discriminator is added.
 
 Status: accepted; amended by [ADR 0006](0006-account-selection-via-restate-scopes.md); the account whose
 szamlazz.hu is the source of truth is the one the invocation's scope resolved to, journaled as the `Account`
@@ -15,12 +22,12 @@ in-flight invocation stays on its original code under normal routing and the jou
 compatibility contract. The crate-owned projections of #127 stay for the reason that was never about replay
 (nothing a handler does not read, and never the agent key, in an entry the UI shows).
 
-**#205 (2026-09-10): approved narrow exception, implementation pending.** ADR 0004's
+**#205 (2026-09-10), implemented by #216: narrow exception.** ADR 0004's
 [unresolved-write decision](0004-kill-not-pause-on-exhausted-retries.md#unresolved-order-writes-205-2026-09-10)
 selects retention plus a durable pre-send unresolved-write marker. It protects across cancellation/kill and
-ambiguous send replay; it does not mirror invoice status. Production still keeps no state. The follow-up must
-replace that invariant, define marker schema/migration and recovery, and reconcile old unmarked uncertainty
-before switching. szamlazz.hu remains the document source of truth. The older caller-contract instruction below
+ambiguous send replay; it does not mirror invoice status. The [protected protocol](../design/order-write-protocol.md)
+defines marker schema/migration and recovery; reconcile old unmarked uncertainty before switching.
+szamlazz.hu remains the document source of truth. The older caller-contract instruction below
 to retry uncertain faults with a new key is superseded too: reconcile first; absence or elapsed time does not
 settle a send. New keys authorize deliberate renewal only after uncertainty is settled. The rest of this ADR stands.
 

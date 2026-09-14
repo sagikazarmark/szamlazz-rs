@@ -444,6 +444,14 @@ impl CredentialStore for MutableAccounts {
 /// changes configuration, not the account), `beta` is a second one. Reachable
 /// by scope only.
 pub(crate) async fn multi_account_services(endpoint: &str) -> (Arc<MutableAccounts>, Order, Agent) {
+    multi_account_services_with_config(endpoint, worker_config()).await
+}
+
+/// Mutable dependencies with a scenario's bounded read and resolve thresholds.
+pub(crate) async fn multi_account_services_with_config(
+    endpoint: &str,
+    worker: ValidatedWorkerConfig,
+) -> (Arc<MutableAccounts>, Order, Agent) {
     let config: StaticConfig = serde_json::from_value(json!({
         "accounts": {
             "acme": {
@@ -467,8 +475,8 @@ pub(crate) async fn multi_account_services(endpoint: &str) -> (Arc<MutableAccoun
         Arc::clone(&mutable) as Arc<dyn AccountResolver>,
         Arc::clone(&mutable) as Arc<dyn CredentialStore>,
     );
-    let order = Order::from_parts(accounts.clone(), worker_config());
-    let agent = Agent::from_parts(accounts, worker_config());
+    let order = Order::from_parts(accounts.clone(), worker.clone());
+    let agent = Agent::from_parts(accounts, worker);
     (mutable, order, agent)
 }
 

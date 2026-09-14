@@ -52,7 +52,10 @@ pub(crate) async fn named_target_deletion_leaves_the_namespace_holder_untouched(
     let first = h
         .call(order, "delete_proforma", &body, "named-delete")
         .await;
-    assert_eq!(first.body, json!({"deleted":true,"reason":null}));
+    assert_eq!(
+        first.body,
+        json!({"outcome":"deleted","reason":null,"code":null,"message":null})
+    );
     assert_eq!(
         h.admin().runs(first.invocation_id()).await,
         [
@@ -72,7 +75,10 @@ pub(crate) async fn named_target_deletion_leaves_the_namespace_holder_untouched(
     let old = h
         .call(order, "delete_proforma", &body, "named-delete")
         .await;
-    assert_eq!(old.body, json!({"deleted":true,"reason":"absent"}));
+    assert_eq!(
+        old.body,
+        json!({"outcome":"absent","reason":null,"code":null,"message":null})
+    );
     h.assert_state_absent(None, order).await;
 }
 
@@ -252,6 +258,33 @@ pub(crate) async fn named_target_deletion_requires_reported_order_type_and_unpai
             .expect(sends)
             .mount(&h.mock)
             .await;
+        if matches!(label, "READ" | "WRONG-NUMBER") {
+            // The named-target prerequisite is retained under the exclusive
+            // invocation policy. Cancel this deliberately permanent outage so
+            // the next case can acquire the same Order key.
+            let call =
+                restate_e2e_harness::Call::object("Szamlazz.Order", order, "delete_proforma");
+            let body = json!({"expected_number":number, "mode":"named_target", "force":force});
+            let key = format!("named-{label}");
+            let owner = h.invoke(&call.send(), Some(&body), Some(&key)).await;
+            assert_eq!(owner.status, 202, "{}", owner.body);
+            assert_eq!(
+                h.admin()
+                    .await_status(owner.invocation_id(), &["paused", "completed"])
+                    .await,
+                "paused"
+            );
+            assert!(h.delete_bodies_of(&number).await.is_empty());
+            h.admin().cancel(owner.invocation_id()).await;
+            let cancelled = h.invoke(&call, Some(&body), Some(&key)).await;
+            assert_eq!(cancelled.invocation_id(), owner.invocation_id());
+            assert_eq!(
+                cancelled.fault().code,
+                restate_szamlazz::contract::TerminalCode::Cancelled
+            );
+            h.assert_state_absent(None, order).await;
+            continue;
+        }
         let reply = h
             .call(
                 order,
@@ -263,13 +296,19 @@ pub(crate) async fn named_target_deletion_requires_reported_order_type_and_unpai
         assert_eq!(reply.status, status, "{label}: {}", reply.body);
         if status == 200 {
             assert_eq!(
-                reply.body["deleted"],
-                reason.is_empty() || reason == "absent",
+                reply.body["outcome"],
+                if reason.is_empty() {
+                    "deleted"
+                } else if reason == "absent" {
+                    "absent"
+                } else {
+                    "conflict"
+                },
                 "{label}"
             );
             assert_eq!(
                 reply.body["reason"],
-                if reason.is_empty() {
+                if reason.is_empty() || reason == "absent" {
                     json!(null)
                 } else {
                     json!(reason)
@@ -330,8 +369,12 @@ pub(crate) async fn deletion_answers_preserve_guard_failures_and_send_uncertaint
         let reply = h.call(&order, "delete_proforma", &body, &key).await;
         assert_eq!(reply.status, status, "{suffix}: {}", reply.body);
         if status == 200 {
-            assert_eq!(reply.body["deleted"], reason.is_empty(), "{}", reply.body);
-            if !reason.is_empty() { assert_eq!(reply.body["reason"], reason); }
+            assert_eq!(reply.body["outcome"], if reason.is_empty() { "absent" } else { "rejected" }, "{}", reply.body);
+            assert!(reply.body["reason"].is_null());
+            if !reason.is_empty() {
+                assert_eq!(reply.body["code"], reason);
+                assert_eq!(reply.body["message"], "XML reading error");
+            }
         } else {
             let fault = reply.fault();
             assert_eq!(fault.szamlazz_code.as_deref(), code, "{fault:?}");
@@ -487,7 +530,7 @@ pub(crate) async fn proforma_is_deleted_by_the_orders_handler(h: &Harness) {
         )
         .await;
     assert_eq!(reply.status, 200, "{}", reply.body);
-    assert_eq!(reply.body["deleted"], true, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "deleted", "{}", reply.body);
     assert!(reply.body["reason"].is_null(), "{}", reply.body);
     h.assert_state_absent(None, "E2E-D1").await;
     assert_eq!(
@@ -511,8 +554,8 @@ pub(crate) async fn proforma_is_deleted_by_the_orders_handler(h: &Harness) {
         )
         .await;
     assert_eq!(again.status, 200, "{}", again.body);
-    assert_eq!(again.body["deleted"], true, "{}", again.body);
-    assert_eq!(again.body["reason"], "absent", "{}", again.body);
+    assert_eq!(again.body["outcome"], "absent", "{}", again.body);
+    assert!(again.body["reason"].is_null(), "{}", again.body);
     assert_eq!(
         h.admin().runs(again.invocation_id()).await,
         ["namespace", "account", "lookup-proforma"],

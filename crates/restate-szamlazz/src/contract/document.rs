@@ -43,9 +43,10 @@ pub struct DocumentInput {
     pub due_date: Date,
     /// Payment method (`fizetési mód`).
     pub payment_method: PaymentMethod,
-    /// Marks the document as already paid (`fizetve`).
-    #[serde(default)]
-    pub paid: bool,
+    /// Explicit paid flag (`fizetve`). Omission leaves the vendor default;
+    /// `Some(false)` explicitly writes false, and `Some(true)` writes true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paid: Option<bool>,
     /// Free-text comment shown on the document (`megjegyzés`).
     #[serde(default)]
     pub comment: Option<String>,
@@ -66,7 +67,7 @@ pub struct DocumentInput {
 }
 
 impl DocumentInput {
-    /// A document with the required fields; `paid` is `false` and the optional
+    /// A document with the required fields; `paid` and the optional
     /// fields are absent.
     #[must_use]
     pub fn new(
@@ -82,7 +83,7 @@ impl DocumentInput {
             fulfillment_date,
             due_date,
             payment_method,
-            paid: false,
+            paid: None,
             comment: None,
             issue_date: None,
             overrides: DocumentOverrides::default(),
@@ -518,7 +519,7 @@ pub(crate) mod tests {
         let json = serde_json::to_value(&document).expect("serialize");
         assert_eq!(json["payment_method"], "transfer");
         assert_eq!(json["fulfillment_date"], "2026-07-04");
-        assert_eq!(json["paid"], false);
+        assert!(json.get("paid").is_none());
         let back: DocumentInput = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, document);
     }
@@ -533,7 +534,16 @@ pub(crate) mod tests {
             "payment_method": {"other": "Bitcoin"},
         }))
         .expect("deserialize");
-        assert!(!document.paid);
+        assert_eq!(document.paid, None);
+        for paid in [None, Some(false), Some(true)] {
+            let mut wire = serde_json::to_value(&document).expect("encode");
+            if let Some(paid) = paid {
+                wire["paid"] = serde_json::json!(paid);
+            }
+            let decoded: DocumentInput = serde_json::from_value(wire.clone()).expect("decode");
+            assert_eq!(decoded.paid, paid);
+            assert_eq!(serde_json::to_value(decoded).expect("encode"), wire);
+        }
         assert_eq!(document.overrides, DocumentOverrides::default());
         assert_eq!(
             document.payment_method,

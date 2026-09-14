@@ -422,7 +422,7 @@ impl Execution {
             ctx.run(|| async {
                 super::prologue::mark_fresh_work();
                 let gateway = self.gateway().await.map_err(|_| std::io::Error::other(format!("Order write unresolved; original: {}; latest reconciliation: pinned recovery account unavailable", original.reason)))?;
-                let result = gateway.reconcile_write(&marker, original.candidate_number.as_deref()).await;
+                let result = gateway.reconcile_write_diagnostic(&marker, &original).await;
                 if let WriteResult::Unresolved(latest) = &result {
                     return Err(std::io::Error::other(format!("Order write unresolved; original: {}; latest reconciliation: {}; reconciliation is read-only; absence does not authorize another send", original.reason, latest.reason)).into());
                 }

@@ -83,7 +83,7 @@ pub use agent::{
 };
 pub use create::{
     ConflictReason, CorrectRequest, CreateOptions, CreateOutcome, CreateRequest, CreateResponse,
-    ProformaLink, Reissue, Warning,
+    CreateResponseView, InvalidCreateResponse, ProformaLink, Reissue, Warning,
 };
 pub use document::{
     Amounts, BuyerInput, DocumentInput, DocumentOverrides, ExchangeRateInput, LineItemInput,
@@ -91,9 +91,9 @@ pub use document::{
 };
 pub use number::{InvalidProviderDocumentNumber, ProviderDocumentNumber};
 pub use storno::{
-    DeleteMode, DeleteProformaRequest, DeleteProformaResponse, DeleteReason, DocumentState,
-    DocumentStatus, InvalidStornoRecipient, OrderStatus, StornoOutcome, StornoRecipient,
-    StornoRequest, StornoResponse,
+    DeleteMode, DeleteProformaOutcome, DeleteProformaRequest, DeleteProformaResponse, DeleteReason,
+    DocumentState, DocumentStatus, InvalidStornoRecipient, OrderStatus, StornoOutcome,
+    StornoRecipient, StornoRequest, StornoResponse,
 };
 
 /// The caller-supplied identities the requests carry, defined in
@@ -937,7 +937,7 @@ mod tests {
     }
 
     /// The delete response's `reason` is a string in the schema (an open
-    /// set: the worker's three tokens and any szamlazz.hu code), referenced
+    /// set: the worker's three known tokens and newer worker tokens), referenced
     /// as its own definition whose description names the tokens, so the
     /// `OpenAPI` export tells a caller what to branch on; the tokens the
     /// description names are the type's own constants.
@@ -954,7 +954,7 @@ mod tests {
         assert_eq!(reason["type"], "string", "{reason}");
         let description = reason["description"].as_str().expect("description");
         for token in [
-            DeleteReason::ABSENT,
+            DeleteReason::TARGET_CHANGED,
             DeleteReason::PROFORMA_PAID,
             DeleteReason::EXTERNAL_ID_COLLISION,
         ] {

@@ -24,18 +24,19 @@ holder (live or reversed) is `conflict{target_changed}`, with `existing_number`
 when known. The expected holder live is `conflict{live}`; reversed, it may
 proceed through prerequisites. Repeat the precondition at the full lookup.
 The create step may send only past that same reversed number; its disappearance
-does not authorize an ordinary create. Absence at the permitted leading query
+does not authorize an ordinary create. Absence or a different owned holder at the permitted leading query
 is also `conflict{target_changed}`: the acknowledged one-use permit proves that
 this invocation has not sent. Record that settled result before clearing the marker.
 After an interrupted send, completed arming cannot grant permission again;
 read-only reconciliation preserves uncertainty on absence instead.
-A replacement found by a re-executed
-create step retains the existing recovery outcomes (`issued` when live,
-`reversed` when reversed), with no further send.
+The 2026-09-14 amendment ([ADR 0018](0018-retained-order-execution-and-evidence-boundaries.md))
+removes the timing-dependent success for a different holder at that final guard.
+After a potentially effective send, positive read-only reconciliation retains its
+separate recovery outcomes and the explicit provider non-regression assumption.
 
 For deletion, a different owned holder is
-`{deleted: false, reason: "target_changed"}`, even with `force`. An absent or
-consumed target remains `{deleted: true, reason: "absent"}`: there is nothing
+`{outcome: "conflict", reason: "target_changed"}`, even with `force`. An absent or
+consumed target is `{outcome: "absent"}`: there is nothing
 under the external id to delete, not proof this command deleted a document.
 The matching holder, including an unexpectedly reversed proforma, proceeds to
 the existing fresh by-number identity/type/payment guard. Deletion always sends
@@ -56,7 +57,7 @@ idempotency. None of these observations is a vendor atomic compare-and-set:
 external writers can race queries and sends. Nor does an expected number settle
 an unresolved earlier send (#205).
 
-Keep the Order stateless. Indefinite command history would cost persistent
+Keep document history out of Order state; unresolved-write uncertainty is its sole state. Indefinite command history would cost persistent
 storage, lifecycle management and a new source of truth merely to answer an old
 command's historical result. An optional precondition with a legacy fallback
 would leave the original bug available, so it is rejected.

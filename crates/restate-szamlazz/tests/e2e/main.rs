@@ -103,6 +103,7 @@ mod privacy;
 mod prologue;
 mod query_document;
 mod query_policy;
+mod retained_prerequisites;
 mod storno;
 mod unresolved;
 mod write_commands;
@@ -141,7 +142,9 @@ impl Concurrently {
     /// under, since a panicked task's `JoinError` carries only its id.
     fn spawn(&mut self, name: &'static str, scenario: impl Future<Output = ()> + Send + 'static) {
         let handle = self.set.spawn(async move {
-            scenario.await;
+            tokio::time::timeout(std::time::Duration::from_secs(90), scenario)
+                .await
+                .unwrap_or_else(|_| panic!("{name}: scenario did not finish within 90 seconds"));
             name
         });
         self.names.insert(handle.id(), name);
@@ -329,7 +332,13 @@ impl Sequentially {
         scenario: impl Future<Output = ()> + Send + 'static,
     ) {
         let phase = step.phase();
-        match tokio::spawn(scenario).await {
+        match tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(90), scenario)
+                .await
+                .unwrap_or_else(|_| panic!("{name}: scenario did not finish within 90 seconds"));
+        })
+        .await
+        {
             Ok(()) => eprintln!("[{phase}] {name}: pass"),
             Err(error) => {
                 eprintln!("[{phase}] {name}: FAIL");
@@ -413,7 +422,7 @@ async fn e2e_order_protocol() {
             delete_proforma::named_target_deletion_requires_reported_order_type_and_unpaid_content,
             delete_proforma::interrupted_deletion_reconciles_without_requerying_or_resending,
             delete_proforma::deletion_answers_preserve_guard_failures_and_send_uncertainty,
-            policies::run_retries_re_execute_a_step_and_exhaustion_is_a_structured_fault,
+            policies::order_retries_retain_prerequisites_and_reconcile_writes,
             policies::a_cancellation_mid_send_is_outcome_unknown_and_releases_the_key,
             policies::cancelled_one_shot_deletion_is_unknown_and_get_reconciles,
             cancellation::cancelled_reads_are_structured,
@@ -441,7 +450,7 @@ async fn e2e_order_protocol() {
             agent_writes::inconclusive_credit_entry_answers_are_stored_unknown_outcomes,
             agent_writes::cancelled_credit_entries_are_unknown_with_mode_specific_guidance,
             storno::purged_order_is_stornoed_and_reissued,
-            prologue::a_flaky_resolver_is_retried_by_the_resolve_policy,
+            prologue::a_flaky_resolver_is_retried_by_the_invocation_policy,
             cancellation::cancelled_resolution_is_structured,
             prologue::a_killed_invocation_releases_the_order_key,
             multi_account::account_change_between_executions_does_not_reach_the_invocation,

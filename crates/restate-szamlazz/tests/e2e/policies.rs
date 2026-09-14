@@ -1,6 +1,6 @@
 //! Read retries and protected Order writes under Restate: read-only
-//! reconciliation after a lost create answer, ordinary read-policy retries
-//! and exhaustion, and cancellation while a write's reply is in flight.
+//! reconciliation after a lost create answer, retained prerequisite retries
+//! and pause/resume, and cancellation while a write's reply is in flight.
 //! These scenarios exercise the production protected-write boundary, including
 //! cancellation fault context and the retained marker guarding later mutations.
 //! They also check re-execution and its delay, `retry_count` and the failing
@@ -16,12 +16,12 @@ use wiremock::ResponseTemplate;
 use restate_szamlazz::contract::{IssuedKind, TerminalCode};
 
 use crate::harness::szamlazz::{
-    Doc, create_for, create_lands_slowly, create_never_sent, created, external_id_query,
-    holds_after_misses, loses_reply_once, not_found, order_query,
+    Doc, create_for, create_lands_slowly, created, external_id_query, holds_after_misses,
+    loses_reply_once, not_found, order_query,
 };
 use crate::harness::{Harness, create_body};
 
-/// Protected reconciliation and the read policy, on three orders at once:
+/// Protected reconciliation and retained prerequisites, on three orders at once:
 ///
 /// - **a lost create answer settles through read-only reconciliation**
 ///   (`E2E-11`): one create loses its reply and the first reconciliation finds
@@ -29,24 +29,21 @@ use crate::harness::{Harness, create_body};
 ///   one-second delay, finds the document and answers `reconciled`, clearing
 ///   its marker. The same `Idempotency-Key` replays that completion without a
 ///   request; a new key then answers `already_issued` from the target lookup.
-/// - **the read policy re-executes a read** (`E2E-27`): the target lookup's
+/// - **the invocation policy re-executes a prerequisite** (`E2E-27`): the target lookup's
 ///   external-id query answers 500 once and code 7 afterwards; the create
 ///   completes `issued` in one invocation with `lookup-invoice` the failing
 ///   command, one journal entry per step, exactly one create;
-/// - **the read policy's exhaustion is a structured `unavailable`**
-///   (`E2E-28`): a read szamlazz.hu never answers is, after three executions,
-///   `unavailable` (503) naming the step, the order, kind and external id,
-///   the create step never run and nothing sent.
+/// - **an unanswered Order prerequisite pauses its invocation** (`E2E-28`):
+///   after three executions, no completion and no create; restoring the read
+///   and resuming that same invocation issues exactly once.
 ///
-/// The resolve policy's twin (the `account` step) runs in phase 2, where a
+/// The resolver's twin (the `account` step) runs in phase 2, where a
 /// resolution can be scripted per scope.
 #[allow(
     clippy::too_many_lines,
-    reason = "one scenario: reconciliation and read policies on separate orders, concurrently"
+    reason = "one scenario: reconciliation and retained prerequisites on separate orders, concurrently"
 )]
-pub(crate) async fn run_retries_re_execute_a_step_and_exhaustion_is_a_structured_fault(
-    h: &Harness,
-) {
+pub(crate) async fn order_retries_retain_prerequisites_and_reconcile_writes(h: &Harness) {
     // The lost create answer: target lookup, full lookup, leading query and
     // first reconciliation miss (four queries). Read-only reconciliation
     // finds the document on its next execution; no second send is permitted.
@@ -88,7 +85,7 @@ pub(crate) async fn run_retries_re_execute_a_step_and_exhaustion_is_a_structured
         .expect(1)
         .mount(&h.mock)
         .await;
-    // The exhausted target lookup: three executions, no answer, no prerequisites.
+    // The retained target lookup: three executions, then pause before prerequisites.
     h.absent("E2E-28", &["prepayment", "final", "proforma"])
         .await;
     order_query("E2E-28")
@@ -97,15 +94,24 @@ pub(crate) async fn run_retries_re_execute_a_step_and_exhaustion_is_a_structured
         .await;
     external_id_query("acct:E2E-28:invoice")
         .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(3)
         .expect(3)
         .mount(&h.mock)
         .await;
-    create_never_sent(&h.mock, "E2E-28").await;
+    external_id_query("acct:E2E-28:invoice")
+        .respond_with(not_found())
+        .mount(&h.mock)
+        .await;
+    create_for("E2E-28")
+        .respond_with(created("SZ-28", "1000", "1270"))
+        .expect(1)
+        .mount(&h.mock)
+        .await;
 
     tokio::join!(
         reconciled_create_then_the_key_replays(h),
         flaky_read_is_re_executed(h),
-        exhausted_read_is_unavailable(h),
+        retained_read_resumes(h),
     );
 }
 
@@ -211,7 +217,7 @@ async fn reconciled_create_then_the_key_replays(h: &Harness) {
     );
 }
 
-/// The read policy's re-execution, on `E2E-27`: one lost reply, `issued` in
+/// The invocation policy's re-execution, on `E2E-27`: one lost reply, `issued` in
 /// one invocation.
 async fn flaky_read_is_re_executed(h: &Harness) {
     let started = Instant::now();
@@ -232,7 +238,7 @@ async fn flaky_read_is_re_executed(h: &Harness) {
     h.assert_state_absent(None, "E2E-27").await;
     assert!(
         elapsed < Duration::from_secs(60),
-        "the read policy's delay was honoured, not the handler's: {elapsed:?}"
+        "the test invocation policy's delay was honoured: {elapsed:?}"
     );
     assert!(retries.max_retry_count >= 1, "{retries:?}");
     assert_eq!(
@@ -273,54 +279,30 @@ async fn flaky_read_is_re_executed(h: &Harness) {
     );
 }
 
-/// The read policy's exhaustion, on `E2E-28`: three unanswered executions,
-/// the structured `unavailable`, nothing sent.
-async fn exhausted_read_is_unavailable(h: &Harness) {
-    let started = Instant::now();
+/// The invocation policy pauses the unfinished read; resume keeps its identity.
+async fn retained_read_resumes(h: &Harness) {
     let watch = h.watch("E2E-28");
-    let reply = h
-        .call(
-            "E2E-28",
-            "create_invoice",
-            &create_body(dec!(1000)),
-            "e2e-28-k1",
-        )
-        .await;
-    let elapsed = started.elapsed();
+    let call = Call::object("Szamlazz.Order", "E2E-28", "create_invoice");
+    let body = create_body(dec!(1000));
+    let owner = h.invoke(&call.send(), Some(&body), Some("e2e-28-k1")).await;
+    assert_eq!(owner.status, 202, "{}", owner.body);
+    assert_eq!(
+        h.admin()
+            .await_status(owner.invocation_id(), &["paused", "completed"])
+            .await,
+        "paused"
+    );
     let retries = watch.finish().await;
-    assert_eq!(reply.status, 503, "{}", reply.body);
-    assert!(
-        elapsed < Duration::from_secs(60),
-        "three executions one second apart, not the handler's policy: {elapsed:?}"
-    );
-    let fault = reply.fault();
-    assert_eq!(fault.code, TerminalCode::Unavailable, "{fault:?}");
-    assert_eq!(fault.order.as_deref(), Some("E2E-28"));
-    assert_eq!(fault.kind, Some(IssuedKind::Invoice));
-    assert_eq!(fault.external_id.as_deref(), Some("acct:E2E-28:invoice"));
-    assert!(fault.message.contains("lookup-invoice"), "{fault:?}");
-    assert!(fault.message.contains("transport failure"), "{fault:?}");
-    assert!(
-        fault.message.contains("reconcile any earlier write"),
-        "{fault:?}"
-    );
     assert!(retries.max_retry_count >= 1, "{retries:?}");
     assert_eq!(
         retries.failing_commands,
         ["lookup-invoice"],
         "the lookup step is the failing command: {retries:?}"
     );
-    let invocation = h.admin().invocation(reply.invocation_id()).await;
-    assert_eq!(invocation.status, "completed", "{invocation:?}");
-    assert!(
-        invocation
-            .completion_failure
-            .as_deref()
-            .is_some_and(|failure| failure.contains("unavailable")),
-        "{invocation:?}"
-    );
+    let invocation = h.admin().invocation(owner.invocation_id()).await;
+    assert!(invocation.completion_failure.is_none(), "{invocation:?}");
     assert_eq!(
-        h.admin().runs(reply.invocation_id()).await,
+        h.admin().runs(owner.invocation_id()).await,
         ["namespace", "account", "lookup-invoice"],
         "the target lookup is journaled; prerequisites and create never ran"
     );
@@ -328,6 +310,19 @@ async fn exhausted_read_is_unavailable(h: &Harness) {
         h.create_bodies_of("E2E-28").await.is_empty(),
         "nothing was created"
     );
+    h.assert_state_absent(None, "E2E-28").await;
+    h.admin().resume(owner.invocation_id()).await;
+    assert_eq!(
+        h.admin()
+            .await_status(owner.invocation_id(), &["completed", "paused"])
+            .await,
+        "completed"
+    );
+    let reply = h.invoke(&call, Some(&body), Some("e2e-28-k1")).await;
+    assert_eq!(reply.invocation_id(), owner.invocation_id());
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.body["outcome"], "issued");
+    assert_eq!(h.create_bodies_of("E2E-28").await.len(), 1);
     h.assert_state_absent(None, "E2E-28").await;
 }
 

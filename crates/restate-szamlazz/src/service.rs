@@ -20,15 +20,34 @@
 //! Each service holds exactly two things: the [`Accounts`] bundle (the
 //! account resolver and the credential store), and a [`ValidatedWorkerConfig`]
 //! with the deployment-level settings (the namespace of the external ids; the
-//! issue, read and resolve policies), validated because a service cannot be
-//! built over an issue policy below its floor. Every handler runs the same prologue after parsing
-//! its key: **pin** the namespace in a pure durable step, **resolve** the
-//! request's scope to its account in a durable step named `account` under the
-//! resolve policy. The first external-operation closure that executes
+//! issue, read, optional query and resolve policies), validated because a service
+//! cannot be built over an issue policy below its floor. Ordinary handlers run
+//! the same prologue after input validation: **pin** the namespace in a pure durable step, **resolve** the
+//! request's scope to its account in a durable step named `account`. Exclusive
+//! Order resolution uses invocation retry/pause without a bounded run policy;
+//! shared/Agent resolution uses the bounded resolve policy. Operator recovery
+//! uses its marker's pinned account without re-resolution; unresolved-state observation
+//! needs neither resolution nor credentials. The first external-operation closure that executes
 //! **fetches** credentials and **opens** a fresh gateway, reused only within
 //! that execution; completed runs replay without either. The handler body
 //! runs on that execution (`prologue::Execution`);
 //! nothing of it (gateway, client, credentials) outlives the execution.
+//!
+//! Exclusive Order required prerequisite reads likewise use invocation retry/pause.
+//! Unanswered document reads include transport/parse failures, reported unavailability
+//! and codes 1/55. Local credential retry exhaustion does not terminalize a retained
+//! prerequisite: its sanitized initialization failure stays retryable inside the run.
+//! Unknown vendor codes remain journaled answers, and provider credential rejection
+//! currently becomes a terminal prerequisite fault; not every answered fault is retained.
+//! Shared `get`, Agent ordinary reads, dedicated operator verification and best-effort
+//! optional hints use bounded read policies (hints remain bounded within Order).
+//! Explicit Agent queries may select their own bounded query policy.
+//!
+//! Repair and resume the same invocation: before arming it can continue prerequisites
+//! toward its first send, replaying completed observations. Protected writes consume
+//! one acknowledged permit; after arming, replay grants no new permission and retained
+//! uncertainty reconciles read-only. Conservative markers can describe an unsent write
+//! after failed initialization or a pre-send read. Absence does not clear that uncertainty.
 //!
 //! - [`Order`]: keyed by the order number; its per-key lock serialises
 //!   issuing per order; registered as `Szamlazz.Order`.

@@ -43,8 +43,7 @@ impl Execution {
 
 /// The `get` status folded from the four reads: a document of ours, live or
 /// reversed, fills the slot of its kind ([`document_status`]); nothing and a
-/// collision leave it `None` (a read must not fail on an answer, and the
-/// issuing handlers are the ones that refuse a collision). A proforma
+/// collision leave it `None`, with collisions explicitly listed. A proforma
 /// szamlazz.hu no longer returns while the invoice or the prepayment carries
 /// `hivdijbekszam` was consumed by that document: `{state: consumed, by}`,
 /// the invoice's reference before the prepayment's.
@@ -78,7 +77,8 @@ fn record_observation(
         OwnershipOutcome::Live(found) | OwnershipOutcome::Reversed(found) => {
             status.set(kind, Some(document_status(&found)));
         }
-        OwnershipOutcome::Absent | OwnershipOutcome::Collision(_) => {}
+        OwnershipOutcome::Absent => {}
+        OwnershipOutcome::Collision(_) => status.collisions.push(kind),
         OwnershipOutcome::Api(answer) => {
             return Err(AnsweredCode::Inconclusive(answer).into_fault(namespace));
         }
@@ -91,6 +91,7 @@ fn record_observation(
 
 fn with_consumed_proforma(mut status: OrderStatus) -> OrderStatus {
     if status.proforma.is_none()
+        && !status.collisions.contains(&DocumentKind::Proforma)
         && let Some(consumer) = [&status.invoice, &status.prepayment]
             .into_iter()
             .flatten()
@@ -120,7 +121,7 @@ fn document_status(found: &FoundDocument) -> DocumentStatus {
     status.document_id = Some(found.document_id);
     status.gross = Some(found.gross_total);
     status.net = Some(found.net_total);
-    status.credit_entries = found.credit_entry_amounts();
+    status.credit_entry_amounts = found.credit_entry_amounts();
     status
         .referenced_proforma
         .clone_from(&found.referenced_proforma_number);
@@ -166,7 +167,7 @@ mod tests {
         assert_eq!(live.state, DocumentState::Live);
         assert_eq!(live.gross, Some(dec!(1270)));
         assert_eq!(live.net, Some(dec!(1000)));
-        assert_eq!(live.credit_entries, [dec!(500), dec!(770)]);
+        assert_eq!(live.credit_entry_amounts, [dec!(500), dec!(770)]);
         assert_eq!(live.referenced_proforma.as_deref(), Some("D-1"));
         assert_eq!(live.e_invoice, Some(false), "eszamla 1 is paper");
 
@@ -184,7 +185,7 @@ mod tests {
                 storno_number: None
             }
         );
-        assert!(reversed_status.credit_entries.is_empty());
+        assert!(reversed_status.credit_entry_amounts.is_empty());
         assert_eq!(reversed_status.referenced_proforma, None);
         assert_eq!(
             reversed_status.e_invoice,
@@ -264,6 +265,7 @@ mod tests {
         assert_eq!(found_invoice.state, DocumentState::Live);
         assert_eq!(found_invoice.gross, Some(dec!(1270)));
         assert_eq!(status.prepayment, None, "a collision is an empty slot");
+        assert_eq!(status.collisions, [DocumentKind::Prepayment]);
         assert_eq!(status.r#final, None);
 
         // The proforma absent and referenced: consumed by the referencing
@@ -310,14 +312,14 @@ mod tests {
         assert_eq!(found_proforma.number, "D-1");
         assert_eq!(found_proforma.state, DocumentState::Live, "not derived");
 
-        // A collision under the proforma's id leaves the slot empty, and the
-        // derivation fills it when a consumer references one.
+        // A collision is not absence, even when an invoice references a proforma.
         let status = fold(
             Collision(other().boxed()),
             Live(invoice(Some("D-1")).boxed()),
             Absent,
         );
-        assert_eq!(status.proforma, consumed_by("SZ-1"));
+        assert_eq!(status.proforma, None);
+        assert_eq!(status.collisions, [DocumentKind::Proforma]);
     }
 
     /// A reversed document of ours fills its slot as `reversed`: `get` reports

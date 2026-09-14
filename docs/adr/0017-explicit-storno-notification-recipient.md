@@ -36,6 +36,12 @@ already-reversed observation cannot reconstruct warning history; uncertainty and
 contradictory identity retain their existing handling. Never repeat storno to recover
 notification. Use the provider's notification action for the existing document.
 
+**2026-09-14 amendment (ADR 0018):** the owning invocation retains a reported warning
+in its unresolved diagnostic alongside the candidate number. Deferred reconciliation
+restores it only if evidence proves that same candidate. A different fallback reversal
+inherits no warning. This preserves known acknowledgement evidence through interruption;
+it does not reconstruct notification history from queries or add buyer data to markers.
+
 New JSON input is optional; old requests preserve omission. Older deployments reject
 the new field. Rust request/step literals need `buyer_email: None`; the constructor
 defaults it. New responses add an open `warnings` array, defaulting empty when decoding

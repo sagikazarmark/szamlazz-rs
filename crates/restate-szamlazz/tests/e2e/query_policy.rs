@@ -205,7 +205,8 @@ async fn e2e_query_policy_is_independent_and_retains_completed_results() {
     mock.verify().await;
     mock.reset().await;
 
-    // A mutation's ownership read still spends [read], not the single-query override.
+    // A mutation's ownership read uses its invocation policy, independently
+    // of the single-query override.
     external_id_query("acct:QUERY-LOOKUP:invoice")
         .respond_with(szlahu_down())
         .up_to_n_times(2)

@@ -101,6 +101,18 @@ unreported notification failure do not establish delivery; notification recovery
 acts on the existing document, never by repeating its reversal. #223.
 _Avoid_: recipient as delivery proof, reversal retry as notification retry
 
+**Retained notification warning**:
+A reported notification failure associated with one reversal candidate. Deferred verification may preserve
+it when that same candidate is established, never transfer it to a different fallback reversal. It is retained
+acknowledgement evidence, not notification history reconstructed by querying. ADR 0018.
+_Avoid_: no warning as delivery proof
+
+**Paid intent**:
+The caller's explicit paid/unpaid instruction on issuance, distinct from an observed payment or credit entry.
+Omission delegates to provider defaults; false explicitly requests unpaid treatment and true paid treatment.
+The worker preserves these three cases; its former false-as-omission conversion is retired (ADR 0018).
+_Avoid_: false as omission, paid intent as payment evidence
+
 **Reported taxpayer validity**:
 The true or false fact NAV supplies about a taxpayer, when supplied; an omitted verdict is unreported, never an invalid taxpayer. Exchange correlation, software metadata and informational diagnostics are distinct from the taxpayer's business data.
 _Avoid_: false for unreported validity, successful lookup as proof of taxpayer validity
@@ -109,7 +121,9 @@ _Avoid_: false for unreported validity, successful lookup as proof of taxpayer v
 API-only credential passed inside the request XML. Preferred over username/password.
 
 **Credit entry (jóváírás / kifizetés)**:
-A payment registered against an invoice via the Agent. IPN reports the resulting current payment status, not the individual credit entry. In the Számla Agent crate it is `CreditEntry` on the way out (`RegisterCreditEntry`) and `RecordedCreditEntry` on the way back (`InvoiceDocument::credit_entries`); its `jogcim` is the **title** on both sides, a `PaymentMethod` (the method the entry was settled by; an unknown token is `PaymentMethod::Other`). The register operation answers the `InvoiceBalance` (net, gross, outstanding, payment method). The one deliberate exception to the word: the CLI verb `szamlazz payment register`, user-facing and kept, since the operator's word for the act is "payment" (#185). The worker's by-number write is `Szamlazz.Agent.set_credit_entries` (`SetCreditEntriesRequest` of `CreditEntryInput { date, title, amount, comment }`, `SetCreditEntriesResponse`, the step `set-credit-entries-{number}`), the queried invoice's are `QueryResponse.credit_entries` (`RecordedCreditEntry`) and `OrderStatus`'s document's `credit_entries`, the projection's `FoundDocument::credit_entries` / `credit_entry_amounts()`: the 0.3 `set_payments` / `PaymentEntry { method, description }` / `payments` were renamed in the Restate-conventions review (2026-09-09), a breaking change of the worker's contract (a handler name is part of the Restate registration).
+The queried invoice's full records are `credit_entries`; the Order observation's amount-only projection is
+`credit_entry_amounts`. They are distinct read surfaces, not two formats of the same field (ADR 0018).
+A payment registered against an invoice via the Agent. IPN reports the resulting current payment status, not the individual credit entry. In the Számla Agent crate it is `CreditEntry` on the way out (`RegisterCreditEntry`) and `RecordedCreditEntry` on the way back (`InvoiceDocument::credit_entries`); its `jogcim` is the **title** on both sides, a `PaymentMethod` (the method the entry was settled by; an unknown token is `PaymentMethod::Other`). The register operation answers the `InvoiceBalance` (net, gross, outstanding, payment method). The one deliberate exception to the word: the CLI verb `szamlazz payment register`, user-facing and kept, since the operator's word for the act is "payment" (#185). The worker's by-number write is `Szamlazz.Agent.set_credit_entries` (`SetCreditEntriesRequest` of `CreditEntryInput { date, title, amount, comment }`, `SetCreditEntriesResponse`, the step `set-credit-entries-{number}`), the queried invoice's are `QueryResponse.credit_entries` (`RecordedCreditEntry`) and `OrderStatus`'s document's `credit_entry_amounts`, the projection's `FoundDocument::credit_entries` / `credit_entry_amounts()`: the 0.3 `set_payments` / `PaymentEntry { method, description }` / `payments` were renamed in the Restate-conventions review (2026-09-09), a breaking change of the worker's contract (a handler name is part of the Restate registration).
 The Adatkapcsolat invoice model uses the same names, `RecordedCreditEntry`, `InvoiceDocument::credit_entries` and `title` for `jogcim` (the receiver keeps `Option<String>`, the agent a `PaymentMethod`; ADR 0010). Receipt `payments` remain the buyer's tenders.
 _Avoid_: payment (overloaded; reserve for the buyer's act, and the receipt's `ReceiptPayment`, which is one), `RecordedPayment` / `payments` on the queried invoice (0.3 names), `method` for `jogcim` (the request's 0.3 name; `title` on both sides since 0.4, the worker's `CreditEntryInput` included), `set_payments` / `PaymentEntry` / `PaymentRecord` / `payments` (the worker's 0.3 wire names)
 
@@ -162,6 +176,9 @@ _Avoid_: gross unit price as the meaning of `unit_price`, monetary parity checke
 ### Restate worker concepts
 
 **Order**:
+One billing unit, distinct from a commercial order with multiple installments or split bills. It has one live
+document per ordinary kind and one prepayment/final chain; the caller owns stable billing-unit identities and
+their association with its commercial order. See ADR 0018 and the worker adoption checklist.
 The `Szamlazz.Order` Restate Virtual Object serializing document mutations per *Scope* and order number, with szamlazz.hu as the document source of truth and only *Unresolved write* uncertainty as durable state. Its key is caller-trimmed, case-preserved, XML 1.0 text of 1–40 UTF-8 bytes with no whitespace, control character or `:`, in Unicode NFC; document ownership, marker admission, recovery and execution rules are in [the protected Order protocol](docs/design/order-write-protocol.md) and [the worker identity contract](crates/restate-szamlazz/README.md#identity).
 _Avoid_: order object, invoice workflow, ledger (there is none; szamlazz.hu is the source of truth), tenant object, a single internal space as allowed (the pre-#64 rule refused only runs)
 
@@ -170,6 +187,9 @@ The two closed enumerations of what an *Order* issues: `DocumentKind` (`Proforma
 _Avoid_: kind for the wire `tipus` (the request word), `DocumentKind` for the deleted adatkapcsolat archive copy (#176), a storno kind
 
 **External id (szamlaKulsoAzon)**:
+Newest-holder discovery relies on accepted provider non-regression: a later issuance must not be settled by
+an older historical holder. Recorded test-account observations support newest-holder behavior, not a provider
+guarantee across outages/recovery. The evidence gap, false-settlement risk and operator response are in ADR 0018.
 The Agent's optional per-document identifier, used by the worker as the identity handle. Deterministic from the key alone under the deployment's *Namespace* (`{namespace}:{order}:{kind}` for the four kinds, `{namespace}:{order}:corrective:{correction_id}`, `{namespace}:{order}:storno:{number}`, `{namespace}:by-number:{number}:storno` for an unmanaged storno), so any invocation can find what an earlier one issued; the two-segment `{namespace}:check-account` is the sentinel *check_account* probes and nothing the service issues carries. Bounded at **110 bytes** (`ExternalId::MAX_LEN`; the length verified accepted and queryable on szamlazz.hu, which documents no limit; a truncated id could hide the document from queries by its full id and prevent reconciliation) by bounding its parts: the namespace at 16, the *Order* key, the `correction_id` (`CorrectionId`) and the caller's *Invoice number* at 40 bytes each, so the longest shape, `{namespace}:{order}:corrective:{correction_id}`, is 109; proven at compile time in `identity.rs`. Its segments are separated by `:` (`ExternalId::SEPARATOR`), which every caller-supplied part excludes, and its eight fixed tokens (`ExternalId::TOKENS`: the five kinds, `storno`, `by-number`, `check-account`) are not correction ids in any letter case. Segment boundaries are unambiguous, but constructor shapes are not universally disjoint: the managed storno of number `storno` under Order `by-number` and the unmanaged storno of that same number share an id. This accepted alias preserves permanent external ids; the spelling alone never establishes managed or unmanaged ownership. It carries no account marker: the namespace is one per deployment and shared by every account, and the *Scope* selects the account. Not unique server-side and never echoed in responses: a query returns the newest holder, and every document found by it is validated (order number, `tipus`) before it is trusted; nothing about the account (see *Account*). It is a discovery handle, never durable write protection. The only namespace marker any worker response carries.
 _Avoid_: idempotency key (szamlazz.hu does not treat it as one), generation (no counter; the newest holder is the answer), external reference, account id or scope inside it (the scope selects the account; the id carries only the namespace), hashing (the parts are bounded so the id never needs it)
 
@@ -217,6 +237,20 @@ _Avoid_: caller authentication (ADR 0006 rule 6; the gateway's), "identity" with
 The source of an account's credentials, addressed by its stable *Credential ref*. Credentials are acquired only when an *Execution* needs an external operation and are held only for that execution; completed operations replay without consulting the store. A dynamic store makes rotation visible to the next execution that needs an operation. A static store retains startup credentials: registering a new immutable deployment does not rotate keys held by an older deployment. Store unavailability, an unknown reference or failed Gateway initialization produces `unavailable` at the executing operation boundary, preserving uncertainty about any earlier send. Credentials and sensitive source messages never enter journals or caller faults. The bounded fetch and failure policy is specified in design §4 (#200, #65, #114).
 _Avoid_: secret store (generic), key store, vault (a product), caching credentials across executions, session (the szamlazz.hu cookie is what the fresh client isolates)
 
+**Retained Order execution**:
+An exclusive billing-unit command whose temporary account-resolution or prerequisite failure retains the
+original invocation and intent for retry, pause and repair-and-resume. A transient prerequisite does not
+become a terminal completed fault. Completed observations remain replayable; resume before arming can
+continue toward the first send, while resume after arming reconciles read-only and grants no new permission.
+Shared observations, Agent calls and optional best-effort hints retain their bounded policies. ADR 0018.
+_Avoid_: a fresh Idempotency-Key as outage recovery, terminalize then retry a recorded prerequisite
+
+**Deletion outcome**:
+Acknowledged deletion, reported absence, a worker conflict or a vendor refusal, kept distinct. Absence includes
+the provider's already-gone answer and proves neither who deleted a proforma nor settlement of an earlier
+uncertain send. Worker reasons and vendor code/message have separate fields in the caller contract. ADR 0018.
+_Avoid_: deleted true for reported absence, vendor code as a worker reason
+
 **Idempotency-Key**:
 Restate's per-*Scope* ingress retry identity for one logical request: keep it while the invocation is unfinished, paused included, to attach or retrieve its retained outcome; a completed fault is replayed under the same key for its retention period. Deliberate renewal after write uncertainty requires settlement of the exact earlier request before a new key, and a new business decision with the original *Expected-document intent*; empty queries, elapsed time, cancellation and kill do not settle uncertainty ([caller contract](crates/restate-szamlazz/README.md#caller-contract), ADR 0004).
 _Avoid_: request id (v1's body field; gone), correlation id, "rotate after any error", rotation as permission to resend
@@ -234,7 +268,7 @@ An intentional stop of a Restate invocation, distinct from infrastructure unavai
 _Avoid_: cancellation as rollback, cancellation as dependency unavailability, cancellation as permission to reissue
 
 **Reissue**:
-Explicit replacement of the particular reversed document named by `options.reissue: {expected_number}`, after settling any earlier write uncertainty; the replacement becomes the newest holder of the same *External id*. An absent or changed target before arming, or an absent target at the permitted final pre-send check, is `conflict{target_changed}` with nothing sent. A matching live target is `conflict{live}`, and a reply naming the old target does not establish replacement: retain uncertainty and reconcile read-only ([ADR 0012](docs/adr/0012-expected-document-mutation-intent.md), [protected protocol](docs/design/order-write-protocol.md)).
+Explicit replacement of the particular reversed document named by `options.reissue: {expected_number}`, after settling any earlier write uncertainty; the replacement becomes the newest holder of the same *External id*. An absent or changed target before arming or at the permitted final pre-send check is `conflict{target_changed}` with nothing sent. A matching live target is `conflict{live}`, and a reply naming the old target does not establish replacement: retain uncertainty and reconcile read-only ([ADR 0012](docs/adr/0012-expected-document-mutation-intent.md), [protected protocol](docs/design/order-write-protocol.md)).
 _Avoid_: re-create, retry (a retry targets the same document)
 
 **Expected-document intent**:
@@ -265,7 +299,11 @@ A live invoice-kind document (`SZ`, `ES`, `VS`) found under the order number by 
 _Avoid_: external document, orphan, foreign for the order's own invoice met by `create_proforma` (that is `order_invoiced`)
 
 **Lookup step**:
-The full read before the *Create step* (`lookup-{kind}`), after the target *Ownership lookup* and prerequisites: one read-only `ctx.run` under the *Read policy* that queries our external id and, for every kind but correctives, takes the order-number hint. It settles every case that needs no create (a live document of ours (`already_issued`, or `conflict{live}` with `reissue`), a reversed one (`reversed{storno_number}`, or proceed with `reissue`), an invalid holder (`conflict{external_id_collision}`), a foreign document (`conflict{foreign}`)), and otherwise hands the create step what it saw. It re-observes changes outside the order's lock after references are resolved; it does not replace the earlier ownership-only read, which settles an existing target before prerequisites can hide it. A query szamlazz.hu did not answer is *Unanswered* and re-executes the whole step; exhaustion is `unavailable{order, kind, external_id}`. Gateway fn: `Gateway::lookup` → `Result<LookupOutcome, Unanswered>`.
+The full read before the *Create step*, after target ownership and prerequisites. It queries our external id
+and, except for correctives, takes the order-number hint, settling existing-document and conflict cases before
+a create. It re-observes changes after references are resolved; it does not replace the earlier ownership-only
+read that settles an existing target before prerequisites can hide it. Unanswered reads retain the exclusive
+Order invocation for retry/pause; completed observations replay. ADR 0018.
 _Avoid_: pre-query (the create step has its own), attempt
 
 **Ownership lookup (`OwnershipOutcome`)**:
@@ -310,16 +348,36 @@ establish that the external operation completed. Recovery separately checks the 
 and its evidence before recording the resolution.
 _Avoid_: operator identity as authorization, recovery authorization as a worker responsibility
 
+**Exact-marker echo**:
+The complete observed unresolved intent returned with a recovery request, preserved as opaque JSON rather
+than reconstructed from selected identity fields. Exactness is of values, not object key ordering. The current
+contract accepts coupling to a versioned marker; unfamiliar versions remain inspectable but cannot authorize
+settlement. A future version requires an explicit evolution decision. ADR 0018.
+_Avoid_: token alone as recovery intent, stripping unknown fields to permit recovery
+
+**Validated create response**:
+A known create outcome whose required reported identity, conflict reason or refusal payload is present.
+Distinct from permissive decoding of an open response, provider truth, and permission for another mutation.
+Optional metadata remains optional; unfamiliar outcomes remain unclassified. ADR 0018.
+_Avoid_: decoded as proof of complete success, validated as provider verification
+
 **Issue policy**:
 The deployment's run retry policy for unmanaged `Szamlazz.Agent.storno`, relying on observed storno idempotence; protected Order writes instead consume one permission and retain read-only reconciliation under their invocation policy. Execution-count and duration limits are exhaustion thresholds, not deadlines or external-send bounds, and delay is not settlement of an earlier request ([worker retry controls](crates/restate-szamlazz/README.md#retry-policy), ADR 0004).
 _Avoid_: attempt budget, backoff (the loop is gone), retry policy without qualification (the handlers have their own), a second copy of "60 s" (derive from `szamlazz_agent::client::REQUEST_TIMEOUT`)
 
 **Read policy**:
-The deployment's run retry policy for ordinary reads and operator document verification: unanswered reads may be re-executed, while replay of a completed read uses its recorded observation. Exhaustion becomes `unavailable` (or absent optional storno information on a best-effort read), cancellation propagates distinctly, and protected Order reconciliation uses its mutation invocation policy instead ([worker retry controls](crates/restate-szamlazz/README.md#retry-policy), ADRs 0004 and 0011).
+The deployment's bounded retry policy for shared observations, Agent reads, operator document verification and optional best-effort hints,
+including hints within Order. Unanswered reads may be re-executed; completed reads replay their recorded
+observations. Exhaustion becomes `unavailable` or an omitted optional hint; cancellation propagates distinctly.
+Exclusive Order prerequisites instead retain their invocation's retry/pause lifecycle
+([worker retry controls](crates/restate-szamlazz/README.md#retry-policy), ADRs 0004, 0011 and 0018).
 _Avoid_: query policy, lookup policy (one read among several), retry policy without qualification, transport retry (the failure is anything unanswered, `szlahu_down` included)
 
 **Unanswered**:
-A read for which szamlazz.hu produced no answer, including a transport or parse failure or reported unavailability; the read-side twin of *Unconfirmed*. Re-execution follows the read's applicable policy, including the independently selectable *Explicit-query policy*, and does not make an unanswered read evidence of absence.
+A read for which szamlazz.hu produced no conclusive answer, including transport/parse failure, reported
+unavailability and retryable document-query codes 1/55; the read-side twin of *Unconfirmed*. A probe's other
+non-credential codes likewise do not establish credential acceptance. Re-execution follows the read's applicable
+policy, including the independently selectable *Explicit-query policy*, and never makes it evidence of absence.
 _Avoid_: transport error (one cause of it), unavailable (the fault it becomes on exhaustion), Unconfirmed (the write steps' error; a write's outcome may be unknown, a read's is simply not yet had)
 
 **Explicit-query policy**:
@@ -361,6 +419,8 @@ The common beginning of a handler after body and key validation: pin the deploym
 _Avoid_: preamble, setup, middleware (there is no interception layer; it is the first lines of every handler), init
 
 **check_account (`Szamlazz.Agent.check_account`)**:
+Credential acceptance requires a reported document or the expected miss. Other non-credential answers remain
+inconclusive; absence of a credential rejection alone does not establish acceptance (ADR 0018).
 The read-only probe for onboarding and deploy pipelines, and the deploy-time canary for the experimental Restate flags: the *Prologue* like every handler, then one durable step (`probe`) under the *Read policy* (a query of the sentinel external id `{namespace}:check-account`, which nothing the service issues carries, expecting "not found"), answering the *Scope* the SDK saw, the *configured* account (`id`), the *Namespace* and whether szamlazz.hu accepted the credentials: `{state: ok}`, or `{state: rejected, code, message}` on 3/135/136/164 **as data, not a fault**. `CredentialsCheck::Other { state, fields }` preserves a newer state and its payload without inferring acceptance; `KNOWN` lists the known state tokens. `scope: null` under a scoped call means the server did not forward the scope (`protocol_v7` off; the ingress does not refuse a scoped path for it); the probe is the only defence against that case, since the worker has no per-request signal of "was this call scoped?" it is willing to depend on (an ingress-path guard on the undocumented, caller-overridable `x-restate-ingress-path` header was considered and dropped). Credential acceptance is its only szamlazz.hu-verified fact. The separate go-live seller check is executable `examples/verify_seller.rs`, using the actual deployed `Accounts` resolver/store and a fresh Számla Agent client per scope to compare a known document's `test` and *Seller block* with independent expectations outside the journal; `Szamlazz.Agent.query` deliberately omits that block. Issues nothing; no input; explicit `journal_retention` so the leak assertion can scan it. Called under each configured scope after a deploy, it proves the scope reaches the worker, resolves to the configured account and its key works; it cannot detect fan-in: it only echoes configuration. An exchange that produced no answer is *Unanswered*, retried; exhaustion is `unavailable`. Gateway fn: `Gateway::probe` → `Result<ProbeOutcome, Unanswered>`; response type `contract::CheckAccountResponse`.
 _Avoid_: health check (it checks one account under one scope, not the process), login test, ping
 
@@ -373,7 +433,10 @@ One handler execution, including replay of earlier completed operations and any 
 _Avoid_: attempt (for the handler; the SDK's word for a run retry is also "attempt", and neither is journaled), session (the szamlazz.hu cookie), context (the SDK's `ctx`), handler span or prologue span (the span is the execution's; it outlives the prologue), the account id in a response (the span and the log carry it; no response does)
 
 **Resolve policy**:
-The deployment's run retry policy for resolving the request's *Account* in the *Prologue*. Duration is the sole exhaustion threshold by default; an execution-count threshold may also be set. Both can overshoot and neither interrupts a hung resolver call; that call has a separate deadline. Configuration and defaults are in design §9. Decision: ADR 0004 (#204 amendment).
+The deployment's bounded retry policy for shared/Agent account resolution in the *Prologue*. Exclusive Order
+resolution instead retains invocation retry/pause. Duration and optional execution-count thresholds can
+overshoot and neither interrupts a hung resolver call; it has a separate deadline. Configuration and defaults
+are in design §9. Decision: ADR 0004 (#204 amendment), ADR 0018.
 _Avoid_: retry policy without qualification, account policy
 
 **Retry policy config**:
@@ -397,6 +460,9 @@ The ordered step-name patterns of every handler path, checked against observed j
 _Avoid_: run-name pin, journal snapshot, a journal compatibility contract, the table's diff as proof of replay compatibility, allowed path patterns as proof of an old invocation's branch
 
 **Shared observation (`get`)**:
+Collision is distinct from absence: kinds whose external-id holders fail ownership validation are reported
+separately from their null slots. A colliding proforma is never inferred consumed. Amount-only credit-entry
+observations are distinct from full queried credit-entry records. ADR 0018.
 What szamlazz.hu reports for the order's four external ids, observed alongside exclusive writes. A non-atomic observation: its separately journaled reads can mix observation times and replay ages. Each new poll needs a fresh invocation/key; reusing a retained *Idempotency-Key* may replay a completed answer, and unspecified discovery retention does not disable deduplication. Absence does not establish that an in-flight create will never land. Native attach/output answers whether a particular invocation completed; `get` answers what the external service reports. Decision: ADR 0005 (#204 amendment).
 _Avoid_: snapshot, completion barrier, "right now", "never stale", "nothing to replay"
 

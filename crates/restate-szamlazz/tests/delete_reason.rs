@@ -6,7 +6,7 @@ use serde_json::json;
 #[test]
 fn unfamiliar_deletion_reasons_preserve_text_without_inventing_vendor_provenance() {
     for token in ["document_locked", "335", "FUTURE_CODE"] {
-        let wire = json!({"deleted": false, "reason": token});
+        let wire = json!({"outcome": "conflict", "reason": token, "code": null, "message": null});
         let response: DeleteProformaResponse =
             serde_json::from_value(wire.clone()).expect("response");
         assert_eq!(response.reason, Some(DeleteReason::Other(token.to_owned())));

@@ -93,6 +93,14 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 
 ## External ids (`szamlaKulsoAzon`)
 
+**Design qualification (2026-09-14; no new provider experiment):** the dated observations below support
+newest-holder discovery. They do not establish non-regression across provider outages/recovery or lost-answer
+reissues. The design accepts that stronger premise explicitly; it is not a provider guarantee. Historical A
+can falsely settle an uncertain replacement of B if reads regress, because A may match order/kind and differ
+from B. [ADR 0018](adr/0018-retained-order-execution-and-evidence-boundaries.md#provider-newest-holdernon-regression-assumption)
+records primary-source limits, the missing raw historical evidence and the operator's quiesce/investigate
+procedure. The Design consequence column is subject to that assumption.
+
 | Behaviour | Verified how | Design consequence |
 |---|---|---|
 | **Not unique**: two `SZ` under different orders with the same external id → both issued, no warning. Re-checked three days later, with the same result, and extended: the same id on a `D` and then an `SZ` under two other orders → both issued (not unique **across kinds** either); the same id on an `SZ` and, in the storno request, on its own `SS` → the `SS` is issued carrying it (not unique between an original and its reversal). szamlazz.hu's documentation describes `szamlaKulsoAzon` only as "the invoice can be identified with this key by the third party system … later the invoice can be queried with this key"; it names no uniqueness rule and no duplicate code, unlike the order number, which has the account toggle and 71/152. | A3-create1/2; XPRB-P1 (`102`, `103`), XPRB-P3 (`D-CTEST-18`, `104`), XPRB-P4 (`105` → `SS` `106`) | Validate ownership by `rendelesszam` and `tipus`, else `conflict{external_id_collision}` before sending; `teszt` is not an account pin (ADR 0006). Post-send reconciliation additionally checks expected issuance intent and retains uncertainty on a mismatch. Nothing about `{namespace}:{order}:{kind}` assumes the server refuses a second holder. |
@@ -137,7 +145,7 @@ Notation: `SZ` invoice, `D` proforma, `ES` prepayment, `VS` final, `HS` correcti
 | Behaviour | Verified how | Design consequence |
 |---|---|---|
 | Converting `D` → `SZ` with `dijbekeroSzamlaszam` under the **shared order number** is not a 152; the `SZ` carries `<hivdijbekszam>`. | C2-3, D4-create-sz | `options.proforma: auto` (default) passes the live proforma found under `{namespace}:{order}:proforma`. |
-| After conversion the `D` is **gone**: 7 by number and by external id; delete → 335. | C2-5, D4-delete-converted, D4-query-proforma-* | `get` reports `proforma: {state: consumed, by}` when the proforma is absent under its id while the invoice or prepayment carries `hivdijbekszam`; `delete_proforma` answers `{deleted: true, reason: absent}`. |
+| After conversion the `D` is **gone**: 7 by number and by external id; delete → 335. | C2-5, D4-delete-converted, D4-query-proforma-* | `get` reports `proforma: {state: consumed, by}` when the proforma is absent under its id while the invoice or prepayment carries `hivdijbekszam`; a collision is not absence. `delete_proforma` answers `{outcome: absent}`, not proof of deletion by that invocation (ADR 0018). |
 | **Auto-linking by order number**: an `ES` issued *without* `dijbekeroSzamlaszam` under the `D`'s order shows `<hivdijbekszam>D-…</hivdijbekszam>` and the `D` became unqueryable. | C1-3, C2 | `proforma: none` is unenforceable on the invoice and the prepayment invoice alike: with a live `D` of ours under `{namespace}:{order}:proforma` the create returns `conflict{proforma_live}`; the caller deletes the proforma or lets `auto` link it. Consumption by an `ES` as well as an `SZ` is derived in `get`. Since #69 `create_prepayment` sends `dijbekeroSzamlaszam` explicitly; the September 11 #218 acceptance record supplies later explicit-link journey evidence, separate from this implicit-link observation. |
 | A **second conversion** from a consumed `D`: same order → replay of the existing `SZ`; different order → a plain `SZ` with the reference **silently dropped** (no `hivdijbekszam`, own `gazdEsemAzon`). | C2-6, D4-create-sz2 | `dijbekeroSzamlaszam` is best-effort and the create response cannot reveal a dropped link. `proforma: {number}` verifies the `D` first; `get` shows the link that actually landed via `referenced_proforma`. |
 | An `SZ` referencing an explicitly **deleted** `D` → success, reference silently ignored (5455 ms). | D5 | 7 on the proforma verify ⇒ `conflict{proforma_missing}`. |

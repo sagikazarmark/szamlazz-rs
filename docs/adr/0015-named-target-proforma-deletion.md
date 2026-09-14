@@ -9,10 +9,15 @@ protocol; silently falling back from an empty slot would change what old command
 Both modes retain `expected_number` and the credit-entry guard (`force` bypasses that guard only). Named
 mode never queries the namespace slot or order-number hint; a coexisting namespace proforma is untouched.
 Wrong order/type is `target_changed`, exact-number query 7 is `absent`, and unanswered or contradictory
-identity is `unavailable`. Before sending, the shared Gateway refreshes the pinned number/internal ID,
+identity in the prerequisite verify retains invocation retry/pause (ADR 0018). Before sending, the shared Gateway refreshes the pinned number/internal ID,
 type, order and credit entries. A local association cannot replace vendor-reported order association.
 
 ## State and recovery
+
+**2026-09-14 response amendment (ADR 0018):** both modes return explicit
+`outcome: deleted | absent | conflict | rejected`. `reason` carries worker conflicts;
+`code`/`message` carry vendor refusals. Code 335 is `absent`, not an acknowledgement
+that this invocation deleted anything. This replaces the earlier `deleted` boolean.
 
 Keep the version-1 marker shape: `operation: {type: delete, number}` already retains all deletion recovery
 intent. Its `external_id` remains the proforma slot for correlation, not proof that the number occupies it.

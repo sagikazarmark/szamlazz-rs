@@ -588,8 +588,10 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 ///   window of refusals. A resolver may cache resolved accounts internally.
 /// - **Answer within seconds.** The worker bounds every `resolve` call at
 ///   ten seconds and drops the future at the deadline; a slow answer is
-///   `unavailable`, retried under the resolve policy, then the terminal
-///   fault. A resolver over a pool or a network sets its own, shorter
+///   a retryable resolution failure. Exclusive Order resolution uses invocation
+///   retry/pause without a bounded run policy; shared/Agent resolution uses the
+///   bounded resolve policy and becomes terminal `unavailable` on exhaustion.
+///   A resolver over a pool or a network sets its own, shorter
 ///   timeouts and answers `Unavailable` itself rather than letting a call
 ///   hang into the worker's bound.
 ///
@@ -639,11 +641,22 @@ pub trait AccountResolver: Send + Sync {
 ///   echoes the store's own message.
 /// - **Answer within seconds.** The worker bounds every `fetch` call at ten
 ///   seconds and drops the future at the deadline; a slow answer is
-///   `unavailable`, retried in process like a reported `Unavailable`, then
-///   terminal `unavailable` on the operation run, bypassing its retry policy
-///   and preserving uncertainty from earlier executions. A store over a secrets service or a network sets its
-///   own, shorter timeouts and answers `Unavailable` itself rather than
-///   letting a call hang into the worker's bound.
+///   retried in process like a reported `Unavailable`: up to three calls with
+///   200 ms pauses. `Gone` ends that local loop immediately. Ending the loop does
+///   not necessarily terminalize the operation: exclusive Order prerequisite
+///   reads keep sanitized initialization failure retryable inside their run under
+///   invocation retry/pause. Shared/Agent operations and dedicated operator
+///   verification retain terminal `unavailable`, bypassing their bounded run
+///   policy; best-effort hints omit their detail, including within Order.
+///   Protected writes retain conservative uncertainty if initialization fails
+///   after consuming permission, even if nothing was sent, and reconcile read-only.
+///   A store over a secrets service or a network sets its own, shorter timeouts
+///   and answers `Unavailable` itself rather than hanging into the worker's bound.
+///
+/// Local store unavailability differs from a provider credential rejection:
+/// the latter is a journaled answer and currently a terminal prerequisite fault.
+/// Repair-and-resume applies to the original retained invocation, not to a
+/// completed terminal fault. No initialization failure settles an earlier send.
 ///
 /// # Debug
 ///

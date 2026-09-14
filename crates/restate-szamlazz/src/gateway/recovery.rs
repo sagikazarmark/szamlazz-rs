@@ -126,6 +126,9 @@ pub(crate) enum WriteResult {
 pub(crate) struct WriteDiagnostic {
     pub(crate) reason: String,
     pub(crate) candidate_number: Option<String>,
+    /// A reported warning belongs only to `candidate_number`.
+    #[serde(default)]
+    pub(crate) notification_delivery_failed: bool,
 }
 
 impl WriteDiagnostic {
@@ -133,6 +136,7 @@ impl WriteDiagnostic {
         Self {
             reason: reason.into(),
             candidate_number: None,
+            notification_delivery_failed: false,
         }
     }
 
@@ -145,9 +149,14 @@ impl WriteDiagnostic {
                 Some(code) => format!("open vendor code {code}"),
                 None => "success without a document number".into(),
             }),
-            super::Unconfirmed::StornoVerification { number, .. } => Self {
+            super::Unconfirmed::StornoVerification {
+                number,
+                notification_delivery_failed,
+                ..
+            } => Self {
                 reason: "numbered storno reply needs positive reversal evidence".into(),
                 candidate_number: Some(number),
+                notification_delivery_failed,
             },
             super::Unconfirmed::Transport(message) | super::Unconfirmed::Unavailable(message) => {
                 Self::new(message)
@@ -190,6 +199,31 @@ impl Gateway {
         order: &OrderKey,
         number: &str,
     ) -> Result<StornoLookupOutcome, Unanswered> {
+        match self
+            .lookup_order_storno_checked(external_id, order, number)
+            .await
+        {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => match error.answered()? {
+                super::Answer::CredentialsRejected(answer) => {
+                    Ok(StornoLookupOutcome::CredentialsRejected(answer))
+                }
+                super::Answer::Api(answer) => Ok(StornoLookupOutcome::Api(answer)),
+                super::Answer::NotFound => Err(Unanswered::Transport(
+                    "reversal evidence absent; reversal is not established".into(),
+                )),
+            },
+        }
+    }
+
+    // Keep vendor-code provenance until the caller selects read retry or
+    // leading-write settlement. In particular, a transient code is no header.
+    async fn lookup_order_storno_checked(
+        &self,
+        external_id: &ExternalId,
+        order: &OrderKey,
+        number: &str,
+    ) -> Result<StornoLookupOutcome, QueryError> {
         let result = match self
             .query_raw(szamlazz_agent::InvoiceSelector::ExternalId(
                 external_id.as_str().to_owned(),
@@ -208,16 +242,11 @@ impl Gateway {
                 storno_number,
                 storno_document_id,
             }),
-            Ok(StornoEvidence::Inconclusive(reason)) => Err(Unanswered::Transport(reason.into())),
-            Err(error) => match error.answered()? {
-                super::Answer::CredentialsRejected(answer) => {
-                    Ok(StornoLookupOutcome::CredentialsRejected(answer))
-                }
-                super::Answer::Api(answer) => Ok(StornoLookupOutcome::Api(answer)),
-                super::Answer::NotFound => Err(Unanswered::Transport(
-                    "original absent; reversal is not established".into(),
-                )),
-            },
+            Ok(StornoEvidence::Inconclusive(reason)) => Err(QueryError::Transport(reason.into())),
+            Err(QueryError::NotFound) => Err(QueryError::Transport(
+                "original absent; reversal is not established".into(),
+            )),
+            Err(error) => Err(error),
         }
     }
 
@@ -260,7 +289,7 @@ impl Gateway {
         match self.settled_by_query(&request, true).await {
             Ok(Some(outcome)) => return WriteResult::Create(outcome),
             Ok(None) | Err(super::QueryError::NotFound) => {}
-            Err(super::QueryError::Api(answer)) => {
+            Err(super::QueryError::Api(answer) | super::QueryError::Transient(answer)) => {
                 return WriteResult::Create(CreateOutcome::Api(answer));
             }
             Err(super::QueryError::CredentialsRejected(answer)) => {
@@ -284,7 +313,7 @@ impl Gateway {
         marker: &UnresolvedWrite,
     ) -> WriteResult {
         match self
-            .lookup_order_storno(request.external_id, &marker.order, request.invoice_number)
+            .lookup_order_storno_checked(request.external_id, &marker.order, request.invoice_number)
             .await
         {
             Ok(StornoLookupOutcome::AlreadyReversed {
@@ -297,13 +326,15 @@ impl Gateway {
                 });
             }
             Ok(StornoLookupOutcome::Absent) => {}
-            Ok(StornoLookupOutcome::Api(answer)) => {
+            Ok(StornoLookupOutcome::Api(answer))
+            | Err(QueryError::Api(answer) | QueryError::Transient(answer)) => {
                 return WriteResult::Storno(StornoOutcome::Api(answer));
             }
-            Ok(StornoLookupOutcome::CredentialsRejected(answer)) => {
+            Ok(StornoLookupOutcome::CredentialsRejected(answer))
+            | Err(QueryError::CredentialsRejected(answer)) => {
                 return WriteResult::Storno(StornoOutcome::CredentialsRejected(answer));
             }
-            Err(Unanswered::Unavailable(message)) => {
+            Err(QueryError::Unavailable(message)) => {
                 return WriteResult::Storno(StornoOutcome::Unavailable { message });
             }
             Err(cause) => return WriteResult::unresolved(cause.to_string()),
@@ -317,6 +348,36 @@ impl Gateway {
             Err(cause) => WriteResult::Unresolved(WriteDiagnostic::unconfirmed(cause)),
             Ok(_) => WriteResult::unresolved("storno requires positive reversal evidence"),
         }
+    }
+
+    /// Reconcile a journaled uncertain write, retaining an acknowledged warning
+    /// only when the evidence establishes that exact reversal candidate.
+    pub(crate) async fn reconcile_write_diagnostic(
+        &self,
+        marker: &UnresolvedWrite,
+        diagnostic: &WriteDiagnostic,
+    ) -> WriteResult {
+        let result = self
+            .reconcile_write(marker, diagnostic.candidate_number.as_deref())
+            .await;
+        if diagnostic.notification_delivery_failed
+            && let WriteResult::Storno(StornoOutcome::AlreadyReversed {
+                storno_number,
+                storno_document_id,
+            }) = &result
+            && diagnostic.candidate_number.as_deref() == Some(storno_number.as_str())
+        {
+            return WriteResult::Storno(StornoOutcome::Reversed(super::IssuedDocument {
+                number: storno_number.clone(),
+                document_id: *storno_document_id,
+                net_total: None,
+                gross_total: None,
+                outstanding: None,
+                customer_account_url: None,
+                notification_delivery_failed: true,
+            }));
+        }
+        result
     }
 
     /// Query positive evidence for the exact marker, never sending a mutation.
@@ -553,6 +614,294 @@ mod tests {
     use crate::test_support::{LogCapture, api_error, open_gateway};
     use szamlazz_agent::Credentials;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::body_string_contains};
+
+    fn query(element: &str, value: &str) -> wiremock::MockBuilder {
+        Mock::given(body_string_contains("action-szamla_agent_xml")).and(body_string_contains(
+            format!("<{element}>{value}</{element}>"),
+        ))
+    }
+
+    #[tokio::test]
+    async fn protected_storno_leading_check_preserves_transient_code_provenance() {
+        for code in [Some("1"), Some("55"), None] {
+            let server = MockServer::start().await;
+            let mut account = Account::new("account", "reference");
+            account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
+            let gateway = open_gateway(account, Credentials::agent_key("key"));
+            let id = ExternalId::new("acct:ORD-1:storno:SZ-1");
+            let marker = UnresolvedWrite {
+                version: MarkerVersion,
+                token: "owner".into(),
+                owner_invocation: "owner".into(),
+                created_at: "2026-09-14T12:00:00Z".into(),
+                scope: None,
+                order: OrderKey::parse("ORD-1").expect("order"),
+                namespace: "acct".parse().expect("namespace"),
+                external_id: id.to_string(),
+                account_id: "account".into(),
+                endpoint: server.uri(),
+                credential_ref: "reference".into(),
+                operation: WriteOperation::Storno {
+                    number: "SZ-1".into(),
+                },
+            };
+            query("szamlaKulsoAzon", id.as_str())
+                .respond_with(code.map_or_else(
+                    || ResponseTemplate::new(503).insert_header("szlahu_down", "maintenance"),
+                    |code| api_error(code, "vendor answer"),
+                ))
+                .expect(2)
+                .mount(&server)
+                .await;
+            Mock::given(body_string_contains("action-szamla_agent_st"))
+                .respond_with(ResponseTemplate::new(500))
+                .expect(0)
+                .mount(&server)
+                .await;
+            // The ordinary protected lookup still feeds its read retry policy.
+            assert!(matches!(
+                gateway
+                    .lookup_order_storno(&id, &marker.order, "SZ-1")
+                    .await,
+                Err(Unanswered::Unavailable(_))
+            ));
+            // Once armed, the leading check records the vendor's actual answer
+            // without sending; only the header can become Unavailable outcome.
+            let result = gateway
+                .protected_storno(
+                    crate::gateway::StornoStepRequest {
+                        invoice_number: "SZ-1",
+                        external_id: &id,
+                        comment: None,
+                        buyer_email: None,
+                        e_invoice: false,
+                        fulfillment_date: jiff::civil::date(2026, 9, 14),
+                    },
+                    &marker,
+                )
+                .await;
+            match (code, result) {
+                (Some(code), WriteResult::Storno(StornoOutcome::Api(answer))) => {
+                    assert_eq!(answer.code, code);
+                    assert_eq!(answer.message, "vendor answer");
+                }
+                (None, WriteResult::Storno(StornoOutcome::Unavailable { message })) => {
+                    assert_eq!(message, "query: szlahu_down");
+                }
+                (_, result) => panic!("unexpected leading check: {result:?}"),
+            }
+            assert_eq!(server.received_requests().await.expect("requests").len(), 2);
+            server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_reissue_refuses_changed_live_reversed_and_absent_holders_before_send() {
+        use crate::contract::{BuyerInput, DocumentInput, LineItemInput, PaymentMethod};
+        use crate::gateway::{CreateStepRequest, DocumentRefs};
+        use crate::test_support::Doc;
+        for response in [
+            Doc::new("SZ-NEW", "SZ").response(),
+            Doc::reversed("SZ-NEW", "SZ").response(),
+            api_error("7", "absent"),
+        ] {
+            let server = MockServer::start().await;
+            let mut account = Account::new("account", "reference");
+            account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
+            let gateway = open_gateway(account, Credentials::agent_key("key"));
+            let external_id = ExternalId::new("acct:ORD-1:invoice");
+            let order = OrderKey::parse("ORD-1").expect("order");
+            query("szamlaKulsoAzon", external_id.as_str())
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(body_string_contains("action-xmlagentxmlfile"))
+                .respond_with(ResponseTemplate::new(500))
+                .expect(0)
+                .mount(&server)
+                .await;
+            let input = DocumentInput::new(
+                BuyerInput::new("Buyer", "1000", "City", "Street"),
+                vec![LineItemInput::new(
+                    "item",
+                    rust_decimal::dec!(1),
+                    "db",
+                    rust_decimal::dec!(1000),
+                    "27",
+                )],
+                jiff::civil::date(2026, 9, 14),
+                jiff::civil::date(2026, 9, 14),
+                PaymentMethod::Transfer,
+            );
+            let create = gateway
+                .build_create(
+                    IssuedKind::Invoice,
+                    &input,
+                    &order,
+                    &external_id,
+                    DocumentRefs::default(),
+                )
+                .expect("create");
+            let request = CreateStepRequest::new(
+                &external_id,
+                IssuedKind::Invoice,
+                &order,
+                &create,
+                Some("SZ-OLD"),
+                None,
+            )
+            .expect("intent");
+            let result = gateway.protected_create(request).await;
+            assert!(
+                matches!(result, WriteResult::Create(CreateOutcome::TargetChanged)),
+                "{result:?}"
+            );
+            assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+            server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one deferred evidence sequence, with exact-candidate and fallback controls"
+    )]
+    async fn deferred_storno_warning_survives_journal_only_for_its_exact_candidate() {
+        use crate::test_support::Doc;
+        for verified_number in ["SS-CANDIDATE", "SS-OTHER"] {
+            let server = MockServer::start().await;
+            let mut account = Account::new("account", "reference");
+            account.endpoint = Endpoint::parse(&server.uri()).expect("endpoint");
+            let gateway = open_gateway(account, Credentials::agent_key("PRIVATE-KEY"));
+            let external_id = ExternalId::new("acct:ORD-1:storno:SZ-1");
+            let marker = UnresolvedWrite {
+                version: MarkerVersion,
+                token: "owner".into(),
+                owner_invocation: "owner".into(),
+                created_at: "2026-09-14T12:00:00Z".into(),
+                scope: None,
+                order: OrderKey::parse("ORD-1").expect("order"),
+                namespace: "acct".parse().expect("namespace"),
+                external_id: external_id.to_string(),
+                account_id: "account".into(),
+                endpoint: server.uri(),
+                credential_ref: "reference".into(),
+                operation: WriteOperation::Storno {
+                    number: "SZ-1".into(),
+                },
+            };
+            query("szamlaKulsoAzon", external_id.as_str())
+                .respond_with(api_error("7", "absent"))
+                .up_to_n_times(1)
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(body_string_contains("action-szamla_agent_st"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("szlahu_error_code", "56")
+                        .insert_header("szlahu_error", "PRIVATE-DIAGNOSTIC")
+                        .insert_header("szlahu_szamlaszam", "SS-CANDIDATE")
+                        .set_body_string(crate::test_support::numbered_reply_body(
+                            "SS-CANDIDATE",
+                            None,
+                        )),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            query("szamlaszam", "SS-CANDIDATE")
+                .respond_with(api_error("1", "PRIVATE-MAINTENANCE"))
+                .up_to_n_times(2)
+                .expect(2)
+                .mount(&server)
+                .await;
+            // The first deferred read fails too. Its fallback cannot settle.
+            query("szamlaKulsoAzon", external_id.as_str())
+                .respond_with(api_error("7", "absent"))
+                .up_to_n_times(1)
+                .expect(1)
+                .mount(&server)
+                .await;
+            query("rendelesSzam", "ORD-1")
+                .respond_with(api_error("7", "absent"))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let result = gateway
+                .protected_storno(
+                    crate::gateway::StornoStepRequest {
+                        invoice_number: "SZ-1",
+                        external_id: &external_id,
+                        comment: None,
+                        buyer_email: Some("notification@example.test"),
+                        e_invoice: false,
+                        fulfillment_date: jiff::civil::date(2026, 9, 11),
+                    },
+                    &marker,
+                )
+                .await;
+            let journal = serde_json::to_string(&result).expect("journal");
+            assert!(!journal.contains("PRIVATE-"));
+            let WriteResult::Unresolved(diagnostic) =
+                serde_json::from_str(&journal).expect("replay")
+            else {
+                panic!("expected retained uncertainty: {journal}");
+            };
+            assert_eq!(diagnostic.candidate_number.as_deref(), Some("SS-CANDIDATE"));
+            assert!(diagnostic.notification_delivery_failed);
+            assert!(matches!(
+                gateway
+                    .reconcile_write_diagnostic(&marker, &diagnostic)
+                    .await,
+                WriteResult::Unresolved(_)
+            ));
+
+            let reversal = Doc {
+                referenced_invoice: Some("SZ-1"),
+                ..Doc::new(verified_number, "SS")
+            };
+            query("szamlaszam", "SS-CANDIDATE")
+                .respond_with(if verified_number == "SS-CANDIDATE" {
+                    reversal.response()
+                } else {
+                    api_error("7", "absent")
+                })
+                .expect(1)
+                .mount(&server)
+                .await;
+            if verified_number != "SS-CANDIDATE" {
+                query("szamlaKulsoAzon", external_id.as_str())
+                    .respond_with(reversal.response())
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            query("szamlaszam", "SZ-1")
+                .respond_with(Doc::reversed("SZ-1", "SZ").response())
+                .expect(1)
+                .mount(&server)
+                .await;
+            let result = gateway
+                .reconcile_write_diagnostic(&marker, &diagnostic)
+                .await;
+            match result {
+                WriteResult::Storno(StornoOutcome::Reversed(issued)) => {
+                    assert_eq!(verified_number, "SS-CANDIDATE");
+                    assert_eq!(issued.number, verified_number);
+                    assert!(issued.notification_delivery_failed);
+                    assert!(issued.document_id.is_some());
+                }
+                WriteResult::Storno(StornoOutcome::AlreadyReversed { storno_number, .. }) => {
+                    assert_eq!(verified_number, "SS-OTHER");
+                    assert_eq!(storno_number, verified_number);
+                }
+                other => panic!("expected verified reversal: {other:?}"),
+            }
+            server.verify().await;
+        }
+    }
 
     #[tokio::test]
     async fn protected_duplicate_diagnostics_alert_without_changing_refusal() {

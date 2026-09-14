@@ -16,6 +16,11 @@ mailbox-delivery evidence. See the [recipient contract](../../crates/restate-sza
 
 ## Observe
 
+Recovery currently takes the **full exact marker**. Preserve it as opaque JSON, including all values/fields
+and integer precision, rather than reconstructing identity fields; key ordering need not be preserved.
+This deliberate schema coupling remains for now. Future marker versions need an explicit compatibility and
+state migration decision; use compatible code for recovery, never strip unknown fields to make it decode.
+
 Call the shared `observe_unresolved` with a fresh invocation/key. It returns `absent`, `unresolved` with the
 marker, or `unreadable`. Preserve the exact marker for recovery. For unreadable state use a compatible deployment;
 do not replace or delete the state to make a mutation proceed.
@@ -35,6 +40,26 @@ Repair credentials or connectivity and resume the owner on its pinned deployment
 not grant another send; recovery only reads. Matching positive evidence completes the operation. Further absence
 or inconclusive evidence eventually pauses again. Keep the original Idempotency-Key while unfinished; it attaches
 to that invocation. `get` observes four ordinary kinds and does not include correctives or prove completion.
+
+An Order can also pause **before arming**, during account resolution or a required prerequisite read.
+Those transient failures, including document-query codes 1/55 and sanitized credential initialization
+failure, remain retryable in the original run. Repair the dependency and resume that same invocation/key;
+it can continue toward its first send. Completed prerequisite observations replay rather than refresh.
+The prerequisite phase precedes marker preparation. Inspect the actual prefix: marker commitment itself
+precedes the arm acknowledgement, so an interruption during arming can already retain a marker.
+Optional best-effort hints, shared `get` and Agent calls retain their bounded policies.
+
+### Suspected historical-holder regression
+
+The worker accepts provider newest-holder/non-regression behavior as an assumption, not a guarantee.
+If an external-id query returns an older document after a newer holder was observed, quiesce mutations for
+the affected scope/Orders, stop automatic resume, preserve exact requests/numbers/observations and contact
+provider support. Establish the exact pending write's effect and exclude delayed execution before proceeding.
+By-number queries aid investigation; an older matching holder is not evidence of the new reissue.
+Keep any marker until authorized evidence settles the exact request. If false settlement already cleared it,
+maintain operational exclusion: the worker cannot recreate that missing uncertainty. The
+[evidence inventory and accepted risk](../adr/0018-retained-order-execution-and-evidence-boundaries.md#provider-newest-holdernon-regression-assumption)
+describe the A→B→uncertain-C counterexample.
 
 ## Submit independent evidence
 
@@ -114,11 +139,11 @@ After recovery make Order private again and repeat drain/inventory before regist
 | Control | Governs |
 |---|---|
 | `WorkerConfig.issue` | The run policy of unmanaged `Szamlazz.Agent.storno` |
-| `WorkerConfig.read` | Ordinary read runs and operator document verification |
+| `WorkerConfig.read` | Shared/Agent reads, optional hints (including inside Order), and dedicated operator `verify-recovery` |
 | `WorkerConfig.query` | Explicit document-query runs when configured; otherwise inherits `read` |
-| `WorkerConfig.resolve` | Account resolution in the prologue |
-| Order mutation invocation policy | Retained read-only reconciliation and infrastructure failures; default 5 executions, 2m → 10m doubling, then pause |
-| Recovery invocation policy | Default 3 executions, 10s → 1m doubling, then pause; journal/idempotency retention 30d |
+| `WorkerConfig.resolve` | Shared/Agent account resolution in the prologue |
+| Order mutation invocation policy | Exclusive resolution, required prerequisite reads, retained reconciliation and infrastructure failures; default 5 executions, 2m → 10m doubling, then pause |
+| Recovery invocation policy | Recovery infrastructure failures; default 3 executions, 10s → 1m doubling, then pause; journal/idempotency retention 30d. `verify-recovery` has its own bounded read policy and terminal initialization failure |
 
 The protected write run consumes one permit; no setting or resume grants a second one. The Rust host can override
 handler invocation policy through SDK `ServiceOptions` / `HandlerOptions` before binding the service definition.
@@ -128,6 +153,14 @@ SDK discovery manifest or deployment-registration reply. On server 1.7.8 these r
 settings, not a live admin policy patch. Existing invocations remain pinned to their deployment; registering new
 settings does not retune them. Resume the owner on that pinned deployment; changing deployment requires ADR 0009's
 exceptional-replay review. Execution counts/durations are exhaustion thresholds, not hard deadlines or vendor fences.
+
+The provider's [five-attempt intervention rule](https://docs.szamlazz.hu/agent/basics/error-handling#retry-limit)
+requires stopping after five unsuccessful sends of the same request and human repair before continuing.
+Never automatically resume paused invocations or rotate keys to reset the budget. One run may make several
+queries, and interrupted open reads can repeat: five executions are not a durable five-request wire cap.
+The provider does not specify how distinct reconciliation selectors are grouped; clarify that scope before
+promising strict accounting. The worker has no durable traffic admission counter. Stop repeated unsuccessful
+traffic for intervention; no elapsed delay or human resume grants a new protected send or settles uncertainty.
 
 Only `storno_invoice` uses 6m inactivity / 3m abort: its retained reconciliation may perform five sequential
 60-second reads (candidate/original, then fallback discovery/candidate/original), plus bounded credential

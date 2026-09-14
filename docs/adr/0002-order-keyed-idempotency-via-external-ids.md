@@ -1,6 +1,8 @@
 # `Order` is keyed by the order number and identifies documents by a deterministic external id
 
 Status: partially superseded by [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md);
+newest-holder behavior is qualified by [ADR 0018](0018-retained-order-execution-and-evidence-boundaries.md):
+non-regression across provider failure/recovery is an accepted assumption, not a documented guarantee;
 amended by [ADR 0006](0006-account-selection-via-restate-scopes.md) (the account namespace, below) and by #40
 (the caller trims the key: a Virtual Object key with leading or trailing whitespace is refused as `invalid_input`
 rather than trimmed by the handler, because Restate's per-key lock is on the raw key and a padded key would be a
