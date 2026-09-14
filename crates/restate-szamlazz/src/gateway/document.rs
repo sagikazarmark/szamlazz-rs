@@ -151,6 +151,10 @@ pub struct RecordedCreditEntry {
     /// The amount (`osszeg`), in the document's currency.
     #[serde(deserialize_with = "crate::contract::decimal::required")]
     #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "crate::contract::decimal::output_schema")
+    )]
     pub amount: Decimal,
     /// The free-text comment (`megjegyzes`).
     #[serde(default)]

@@ -53,7 +53,9 @@
 //! *Credit entry*). **JSON**: fields `snake_case`; requests closed
 //! (`deny_unknown_fields`), responses open (`#[non_exhaustive]`); decimals
 //! as strings (a number accepted exactly on input; unrepresentable quantities,
-//! prices, credit-entry amounts and exchange rates are refused), dates as ISO `YYYY-MM-DD`; an
+//! prices, credit-entry amounts and exchange rates are refused), caller dates strictly
+//! `YYYY-MM-DD` with years 0001 through 9999; timestamps are refused rather than
+//! truncated. Named input records require objects, including nested records. An
 //! absent optional response field is `null`, a fault's included.
 
 use std::fmt;
@@ -63,8 +65,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod agent;
 pub mod create;
+mod date;
 pub(crate) mod decimal;
 pub mod document;
+mod number;
+mod object;
 pub mod recovery;
 pub mod storno;
 
@@ -84,6 +89,7 @@ pub use document::{
     Amounts, BuyerInput, DocumentInput, DocumentOverrides, ExchangeRateInput, LineItemInput,
     MonetaryError, MonetaryPreflight, PaymentMethod, PostalAddressInput, TaxpayerStatus,
 };
+pub use number::{InvalidProviderDocumentNumber, ProviderDocumentNumber};
 pub use storno::{
     DeleteMode, DeleteProformaRequest, DeleteProformaResponse, DeleteReason, DocumentState,
     DocumentStatus, InvalidStornoRecipient, OrderStatus, StornoOutcome, StornoRecipient,
@@ -565,12 +571,12 @@ mod tests {
         );
     }
 
-    /// The bound reaches every request that names a document by number, and
+    /// The bound reaches every mutation request that names a document by number, and
     /// it is applied where the body is decoded: a refused number is a
     /// *Malformed body*, `invalid_input` before the Prologue with serde's
     /// message naming the rule.
     #[test]
-    fn every_by_number_request_refuses_an_invoice_number_outside_the_bound() {
+    fn every_by_number_mutation_refuses_an_invoice_number_outside_the_bound() {
         fn refused<T: serde::de::DeserializeOwned + std::fmt::Debug>(
             name: &str,
             body: serde_json::Value,
@@ -599,10 +605,6 @@ mod tests {
         refused::<SetCreditEntriesRequest>(
             "SetCreditEntriesRequest",
             serde_json::json!({"invoice_number": too_long, "entries": []}),
-        );
-        refused::<QueryRequest>(
-            "QueryRequest",
-            serde_json::json!({"selector": {"invoice_number": too_long}}),
         );
         refused::<CreateRequest>(
             "CreateRequest.options.proforma",

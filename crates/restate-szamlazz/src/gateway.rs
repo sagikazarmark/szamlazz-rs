@@ -375,29 +375,126 @@ pub enum LookupOutcome {
 /// The create step: query the external id, then send the
 /// create unless a live document of ours is already there.
 ///
-/// Carries what identifies the document and the create to send. A found
-/// document is validated against `order` and `kind`
-/// ([`FoundDocument::is_ours`]).
+/// Construct with [`Self::new`], which checks that the outbound create agrees
+/// exactly with the identity and corrective intent used for lookup and recovery.
+/// The immutable borrow keeps that agreement valid until sending. This local
+/// consistency check supplies no durable admission or send permission (ADR 0014).
+///
+/// Validated identity cannot be replaced through a public field:
+///
+/// ```compile_fail,E0616
+/// # use restate_szamlazz::gateway::CreateStepRequest;
+/// # use restate_szamlazz::contract::IssuedKind;
+/// # fn change(mut request: CreateStepRequest<'_>) {
+/// request.kind = IssuedKind::Proforma;
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct CreateStepRequest<'a> {
     /// The external id the document carries and is looked up by.
-    pub external_id: &'a ExternalId,
+    external_id: &'a ExternalId,
     /// The kind being issued; a found document must have the matching `tipus`.
-    pub kind: IssuedKind,
+    kind: IssuedKind,
     /// The order the document belongs to.
-    pub order: &'a OrderKey,
+    order: &'a OrderKey,
     /// The create request built by [`Gateway::build_create`].
-    pub create: &'a CreateInvoice,
+    create: &'a CreateInvoice,
     /// The number of the reversed document the lookup step saw under the
     /// external id (a reissue). It is the one holder the step may send past;
     /// a live document that is not this one was issued by an earlier
     /// execution of the step, and a reversed document that is not this one
     /// was reversed since the lookup. If this expected holder disappears,
     /// the leading query answers `TargetChanged`, never authorizing a send.
-    pub reversed: Option<&'a str>,
+    reversed: Option<&'a str>,
+    /// The independently supplied corrective base, checked against the create.
+    corrected_number: Option<&'a str>,
 }
 
-impl CreateStepRequest<'_> {
+/// Outbound create identity disagrees with the intended lookup and recovery.
+/// Construction fails locally, before any external query or send. Values from
+/// the supplied document are deliberately absent from these diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum CreateStepRequestError {
+    /// Missing or different outbound `szamlaKulsoAzon`.
+    #[error("create external id must exactly match the intended external id")]
+    ExternalIdMismatch,
+    /// Missing or different outbound `rendelesSzam`.
+    #[error("create order number must exactly match the intended order")]
+    OrderMismatch,
+    /// A supported outbound kind differs from the intended issued kind.
+    #[error("create kind must match the intended issued kind")]
+    KindMismatch,
+    /// Delivery notes and future unsupported Számla Agent kinds cannot be issued.
+    #[error("create kind is not supported by Gateway issuance")]
+    UnsupportedKind,
+    /// A corrective requires an exact, nonblank base; other kinds require none.
+    #[error(
+        "create corrective base must exactly match the intended nonblank base, and be absent for other kinds"
+    )]
+    CorrectiveIntentMismatch,
+}
+
+impl<'a> CreateStepRequest<'a> {
+    /// Check the outbound request against the identity to look up and retain.
+    /// `corrected_number` must name the intended base for a corrective and be
+    /// `None` otherwise. Comparisons do not trim or normalize either side.
+    /// `reversed` names the expected old holder for an explicit reissue; it has
+    /// no outbound XML field and is retained unchanged for reconciliation.
+    ///
+    /// This accepts [`Gateway::build_create`] output or a hand-built create,
+    /// checking identity agreement rather than document content or provider
+    /// acceptance. The caller still owns durable exclusion, uncertainty and
+    /// settlement, and separately grants [`CreatePermission`].
+    ///
+    /// # Errors
+    ///
+    /// [`CreateStepRequestError`] on missing or inconsistent identity, corrective
+    /// intent, or an unsupported kind. No external operation is performed.
+    pub fn new(
+        external_id: &'a ExternalId,
+        kind: IssuedKind,
+        order: &'a OrderKey,
+        create: &'a CreateInvoice,
+        reversed: Option<&'a str>,
+        corrected_number: Option<&'a str>,
+    ) -> Result<Self, CreateStepRequestError> {
+        use szamlazz_agent::ops::invoice::InvoiceKind;
+
+        if create.external_id.as_deref() != Some(external_id.as_str()) {
+            return Err(CreateStepRequestError::ExternalIdMismatch);
+        }
+        if create.header.order_number.as_deref() != Some(order.as_str()) {
+            return Err(CreateStepRequestError::OrderMismatch);
+        }
+        let (outbound_kind, outbound_base) = match &create.kind {
+            InvoiceKind::Invoice { .. } => (IssuedKind::Invoice, None),
+            InvoiceKind::Proforma => (IssuedKind::Proforma, None),
+            InvoiceKind::Prepayment { .. } => (IssuedKind::Prepayment, None),
+            InvoiceKind::Final { .. } => (IssuedKind::Final, None),
+            InvoiceKind::Corrective { corrected_number } => {
+                (IssuedKind::Corrective, Some(corrected_number.as_str()))
+            }
+            _ => return Err(CreateStepRequestError::UnsupportedKind),
+        };
+        if outbound_kind != kind {
+            return Err(CreateStepRequestError::KindMismatch);
+        }
+        if outbound_base != corrected_number
+            || corrected_number.is_some_and(|number| number.trim().is_empty())
+        {
+            return Err(CreateStepRequestError::CorrectiveIntentMismatch);
+        }
+        Ok(Self {
+            external_id,
+            kind,
+            order,
+            create,
+            reversed,
+            corrected_number,
+        })
+    }
+
     /// Minimal intent to retain before sending and supply to [`Gateway::reconcile`]
     /// afterwards. Keep it with this request's external id, order and account.
     #[must_use]
@@ -405,12 +502,7 @@ impl CreateStepRequest<'_> {
         recovery::WriteOperation::Create {
             kind: self.kind,
             expected_number: self.reversed.map(str::to_owned),
-            corrected_number: match &self.create.kind {
-                szamlazz_agent::ops::invoice::InvoiceKind::Corrective { corrected_number } => {
-                    Some(corrected_number.to_string())
-                }
-                _ => None,
-            },
+            corrected_number: self.corrected_number.map(str::to_owned),
         }
     }
 }

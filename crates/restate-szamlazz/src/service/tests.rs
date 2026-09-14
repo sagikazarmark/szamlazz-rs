@@ -25,8 +25,9 @@ const MIN_INITIAL_DELAY_MS: u64 = IssueConfig::MIN_INITIAL_DELAY.as_millis() as 
 /// The `inactivity_timeout` / `abort_timeout` of every handler whose step is
 /// one szamlazz.hu round trip (the four reads and `set_credit_entries`' one send)
 /// in the discovery reports (milliseconds): `2m`, the 60 s client timeout
-/// plus the margin a stalling szamlazz.hu needs (#114). The writes whose step
-/// is three trips carry `4m` / `3m`. A literal, like the attributes it
+/// plus bounded initialization and margin (#114). Three-trip writes carry
+/// `4m` / `3m`; Order storno's five-read reconciliation carries `6m` / `3m`.
+/// A literal, like the attributes it
 /// asserts (the handler macro takes no constant).
 const ONE_TRIP_TIMEOUT_MS: u64 = 120_000;
 
@@ -54,7 +55,14 @@ fn worker_config() -> ValidatedWorkerConfig {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one inventory of the Order discovery contract"
+)]
 fn order_discovers_mutations_reads_and_operator_recovery() {
+    use crate::contract::recovery::{RecoveryRequest, RecoveryResponse, UnresolvedObservation};
+    use restate_sdk::serde::{Json, PayloadMetadata as _};
+
     let discovery = <Order as Discoverable>::discover();
     assert_eq!(discovery.name.as_str(), "Szamlazz.Order");
     assert_eq!(discovery.ty, ServiceType::VirtualObject);
@@ -87,9 +95,50 @@ fn order_discovers_mutations_reads_and_operator_recovery() {
         assert!(handler.output.is_some(), "{name} returns an output");
         if matches!(name, "observe_unresolved" | "recover") {
             if name == "recover" {
+                assert_eq!(
+                    handler.retry_policy_on_max_attempts,
+                    Some(RetryPolicyOnMaxAttempts::Pause)
+                );
+                assert_eq!(handler.retry_policy_max_attempts, Some(3));
+                assert_eq!(handler.retry_policy_initial_interval, Some(10_000));
+                assert_eq!(handler.retry_policy_exponentiation_factor, Some(2.0));
+                assert_eq!(handler.retry_policy_max_interval, Some(60_000));
+                assert_eq!(handler.inactivity_timeout, Some(240_000));
+                assert_eq!(handler.abort_timeout, Some(180_000));
                 assert_eq!(handler.journal_retention, Some(30 * 24 * 3_600_000));
                 assert_eq!(handler.idempotency_retention, Some(30 * 24 * 3_600_000));
+                let input = handler.input.as_ref().expect("recovery input");
+                assert!(input.content_type.is_some());
+                assert_eq!(
+                    input.json_schema,
+                    <super::Body<RecoveryRequest>>::json_schema()
+                );
+            } else {
+                // State-only shared observation deliberately inherits deployment/server defaults.
+                assert_eq!(handler.retry_policy_on_max_attempts, None);
+                assert_eq!(handler.retry_policy_max_attempts, None);
+                assert_eq!(handler.retry_policy_initial_interval, None);
+                assert_eq!(handler.retry_policy_exponentiation_factor, None);
+                assert_eq!(handler.retry_policy_max_interval, None);
+                assert_eq!(handler.inactivity_timeout, None);
+                assert_eq!(handler.abort_timeout, None);
+                assert_eq!(handler.journal_retention, None);
+                assert_eq!(handler.idempotency_retention, None);
+                let input = handler.input.as_ref().expect("empty observation input");
+                assert!(input.content_type.is_none() && input.json_schema.is_none());
             }
+            assert_eq!(
+                handler
+                    .output
+                    .as_ref()
+                    .expect("recovery output")
+                    .json_schema,
+                if name == "recover" {
+                    <Json<RecoveryResponse>>::json_schema()
+                } else {
+                    <Json<UnresolvedObservation>>::json_schema()
+                }
+            );
             assert_eq!(
                 handler.ty,
                 if name == "observe_unresolved" {
@@ -136,10 +185,8 @@ fn order_discovers_mutations_reads_and_operator_recovery() {
         // Exclusive is the Virtual Object default and left implicit (`None`).
         assert_eq!(handler.ty, None, "{name}");
         assert!(handler.input.is_some(), "{name} takes an input");
-        // Every handler that calls szamlazz.hu kills after 5 attempts with a
-        // 2m → 10m back-off and bounded timeouts. The 2m is the same rule as
-        // the issue policy's floor: the retry after a crash waits out the
-        // client timeout plus a margin.
+        // Protected mutations pause after 5 attempts with a 2m → 10m interval.
+        // The interval allows visibility time, never permission for another send.
         assert_eq!(
             handler.retry_policy_initial_interval,
             Some(120_000),
@@ -156,7 +203,15 @@ fn order_discovers_mutations_reads_and_operator_recovery() {
             "{name}"
         );
         assert_eq!(handler.retry_policy_max_attempts, Some(5), "{name}");
-        assert_eq!(handler.inactivity_timeout, Some(240_000), "{name}");
+        assert_eq!(
+            handler.inactivity_timeout,
+            Some(if name == "storno_invoice" {
+                360_000
+            } else {
+                240_000
+            }),
+            "{name}"
+        );
         assert_eq!(handler.abort_timeout, Some(180_000), "{name}");
         assert_eq!(
             handler.journal_retention,
@@ -253,8 +308,8 @@ fn agent_discovers_as_a_service_with_five_handlers() {
                 "{name}"
             );
             // Both writes wait out the 60 s client timeout before the retry
-            // after a crash (never the server's ~500 ms default), so that the
-            // re-execution cannot run while the first send is still in flight:
+            // after a crash (never the server's ~500 ms default). This allows
+            // visibility time but does not fence delayed vendor execution:
             // `set_credit_entries` because an additive send is at-least-once,
             // `storno` because its re-execution's leading query would
             // otherwise look before the cut send has landed. The same rule
@@ -269,13 +324,9 @@ fn agent_discovers_as_a_service_with_five_handlers() {
                 "{name}: initial_interval under IssueConfig::MIN_INITIAL_DELAY"
             );
             if name == "storno" {
-                // The storno step is the same closure `Szamlazz.Order` runs, so
-                // the policy is `Szamlazz.Order`'s throughout (#87): five
-                // attempts, 2m → 10m (invocation attempts are spent only on
-                // worker-side failures and every re-dispatch is query-first,
-                // so nothing about an unmanaged storno justifies a shorter
-                // budget), and the 4m/3m timeouts (query, send, re-query at
-                // 60 s each): anything shorter suspends a slow storno mid-step.
+                // Unmanaged storno retains query-first retries and kill, with
+                // 4m/3m for query, send and re-query at 60 s each. Protected
+                // Order storno instead allows five-read reconciliation and pauses.
                 assert_eq!(handler.retry_policy_max_interval, Some(600_000), "{name}");
                 assert_eq!(
                     handler.retry_policy_exponentiation_factor,

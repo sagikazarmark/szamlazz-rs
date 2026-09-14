@@ -16,12 +16,13 @@ use serde::{Deserialize, Serialize};
 use super::document::DocumentInput;
 use super::{CorrectionId, InvoiceNumber, IssuedKind};
 
+super::object::object_input! {
 /// Input of `Szamlazz.Order.create_proforma`, `create_invoice`,
 /// `create_prepayment` and `create_final`.
 ///
 /// The retry identity of a request is Restate's ingress `Idempotency-Key`;
 /// the request carries none of its own.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateRequest {
@@ -30,6 +31,7 @@ pub struct CreateRequest {
     /// Kind-specific options; all default.
     #[serde(default)]
     pub options: CreateOptions,
+}
 }
 
 impl CreateRequest {
@@ -43,8 +45,9 @@ impl CreateRequest {
     }
 }
 
+super::object::object_input! {
 /// Options of a create request.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct CreateOptions {
@@ -60,15 +63,18 @@ pub struct CreateOptions {
     /// anything but `auto` as `invalid_input`.
     pub proforma: ProformaLink,
 }
+}
 
+super::object::object_input! {
 /// Permission to replace exactly one known, reversed document.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Reissue {
     /// The original number from a create/reversed response or fresh `get`.
     /// A replacement never inherits this permission.
     pub expected_number: InvoiceNumber,
+}
 }
 
 /// How a create request refers to a proforma.
@@ -93,8 +99,9 @@ pub enum ProformaLink {
     Number(InvoiceNumber),
 }
 
+super::object::object_input! {
 /// Input of `Szamlazz.Order.correct_invoice`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CorrectRequest {
@@ -107,6 +114,7 @@ pub struct CorrectRequest {
     pub correction_id: CorrectionId,
     /// The corrective document.
     pub document: DocumentInput,
+}
 }
 
 impl CorrectRequest {
@@ -505,16 +513,28 @@ pub struct CreateResponse {
     /// Net total (`nettó végösszeg`).
     #[serde(default, deserialize_with = "super::decimal::optional")]
     #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "super::decimal::optional_output_schema")
+    )]
     pub net_total: Option<Decimal>,
     /// Gross total (`bruttó végösszeg`).
     #[serde(default, deserialize_with = "super::decimal::optional")]
     #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "super::decimal::optional_output_schema")
+    )]
     pub gross_total: Option<Decimal>,
     /// Outstanding amount (`kintlévőség`).
     /// When derived from a queried document, absent if gross is unknown or the
     /// credit-entry sum or subtraction cannot fit exactly in a decimal.
     #[serde(default, deserialize_with = "super::decimal::optional")]
     #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "super::decimal::optional_output_schema")
+    )]
     pub outstanding: Option<Decimal>,
     /// Buyer-facing account URL (`vevői fiók URL`). szamlazz.hu returns it
     /// only in the response to the create that issued the document, so it is

@@ -1,11 +1,12 @@
 //! Monetary assertions and exact, bounded integer arithmetic for their validation.
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use szamlazz_agent::{ArithmeticError, Currency, LineItem, VatRate};
 
 use super::{DocumentInput, LineItemInput};
 use crate::contract::decimal::exact_add;
 
+crate::contract::object::object_input! {
 /// Authoritative net, VAT and gross amounts, either for a line or the document.
 ///
 /// Explicit lines support HUF/Ft (whole amounts) and EUR (cents). Net must be
@@ -16,7 +17,7 @@ use crate::contract::decimal::exact_add;
 /// EAM, KBAUK and KBAET are accepted with zero VAT. Other codes are refused
 /// for explicit lines, without changing the open-set legacy calculation.
 /// This validates monetary consistency, not tax eligibility or vendor acceptance.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Amounts {
@@ -50,6 +51,7 @@ pub struct Amounts {
         schemars(schema_with = "crate::contract::decimal::schema")
     )]
     pub gross: Decimal,
+}
 }
 
 /// Validated monetary content: the exact lines used by request construction and

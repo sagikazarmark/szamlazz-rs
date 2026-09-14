@@ -19,6 +19,9 @@ mailbox-delivery evidence. See the [recipient contract](../../crates/restate-sza
 Call the shared `observe_unresolved` with a fresh invocation/key. It returns `absent`, `unresolved` with the
 marker, or `unreadable`. Preserve the exact marker for recovery. For unreadable state use a compatible deployment;
 do not replace or delete the state to make a mutation proceed.
+An `unresolved` observation always carries `marker`; newer marker versions and unfamiliar state strings remain
+inspectable but grant no recovery permission. `observe_unresolved` declares no retry, timeout or retention
+overrides of its own: inspect the effective inherited settings, and use a fresh invocation for a new observation.
 
 Inspect the owner in Restate's UI/admin API. Its named write run retains a safe reason and candidate document
 number when available; the open `reconcile-write` failure names the original cause and latest reconciliation
@@ -112,14 +115,25 @@ After recovery make Order private again and repeat drain/inventory before regist
 |---|---|
 | `WorkerConfig.issue` | The run policy of unmanaged `Szamlazz.Agent.storno` |
 | `WorkerConfig.read` | Ordinary read runs and operator document verification |
+| `WorkerConfig.query` | Explicit document-query runs when configured; otherwise inherits `read` |
 | `WorkerConfig.resolve` | Account resolution in the prologue |
 | Order mutation invocation policy | Retained read-only reconciliation and infrastructure failures; default 5 executions, 2m → 10m doubling, then pause |
+| Recovery invocation policy | Default 3 executions, 10s → 1m doubling, then pause; journal/idempotency retention 30d |
 
 The protected write run consumes one permit; no setting or resume grants a second one. The Rust host can override
 handler invocation policy through SDK `ServiceOptions` / `HandlerOptions` before binding the service definition.
-Apply overrides to each intended handler and retain pause-on-exhaustion. Check effective settings through Restate
-service discovery after registration. On server 1.7.8 these retry policies are deployment settings, not a live
-admin policy patch. Execution counts/durations are exhaustion thresholds, not hard deadlines or vendor fences.
+Apply overrides to each intended handler and retain pause-on-exhaustion. The server-wide maximum-attempts ceiling
+can cap the handler's requested value. Check effective service/handler settings after registration, not only the
+SDK discovery manifest or deployment-registration reply. On server 1.7.8 these retry policies are deployment
+settings, not a live admin policy patch. Existing invocations remain pinned to their deployment; registering new
+settings does not retune them. Resume the owner on that pinned deployment; changing deployment requires ADR 0009's
+exceptional-replay review. Execution counts/durations are exhaustion thresholds, not hard deadlines or vendor fences.
+
+Only `storno_invoice` uses 6m inactivity / 3m abort: its retained reconciliation may perform five sequential
+60-second reads (candidate/original, then fallback discovery/candidate/original), plus bounded credential
+initialization (three ten-second fetches and two 200 ms pauses). Other protected mutations and `recover` retain
+4m / 3m; unmanaged Agent storno retains 4m / 3m. Inactivity requests suspension after lack of progress;
+abort bounds the subsequent wait, not a concurrent timer or proof that the external request stopped.
 
 Unkeyed Agent credit entries do not use Order's marker. Before renewal, independently settle earlier registration
 and exclude delayed execution, then query again and submit only still-required entries or the current replacement.

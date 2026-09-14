@@ -592,22 +592,24 @@ mod tests {
                 ],
             );
             create.header.order_number = Some("ORD-1".into());
+            create.external_id = Some(external_id.as_str().to_owned());
             Mock::given(body_string_contains("action-xmlagentxmlfile"))
                 .respond_with(api_error("152", "duplicate"))
                 .expect(1)
                 .mount(&server)
                 .await;
-            Mock::given(body_string_contains(
-                "<szamlaKulsoAzon>acct:ORD-1:invoice</szamlaKulsoAzon>",
-            ))
-            .respond_with(if hint {
-                api_error("7", "absent")
-            } else {
-                api_error("135", "PRIVATE-DIAGNOSTIC")
-            })
-            .expect(1)
-            .mount(&server)
-            .await;
+            Mock::given(body_string_contains("action-szamla_agent_xml"))
+                .and(body_string_contains(
+                    "<szamlaKulsoAzon>acct:ORD-1:invoice</szamlaKulsoAzon>",
+                ))
+                .respond_with(if hint {
+                    api_error("7", "absent")
+                } else {
+                    api_error("135", "PRIVATE-DIAGNOSTIC")
+                })
+                .expect(1)
+                .mount(&server)
+                .await;
             if hint {
                 Mock::given(body_string_contains("<rendelesSzam>ORD-1</rendelesSzam>"))
                     .respond_with(api_error("135", "PRIVATE-DIAGNOSTIC"))
@@ -621,13 +623,15 @@ mod tests {
                 .count();
             let result = gateway
                 .create_send(
-                    &CreateStepRequest {
-                        external_id: &external_id,
-                        kind: IssuedKind::Invoice,
-                        order: &order,
-                        create: &create,
-                        reversed: None,
-                    },
+                    &CreateStepRequest::new(
+                        &external_id,
+                        IssuedKind::Invoice,
+                        &order,
+                        &create,
+                        None,
+                        None,
+                    )
+                    .expect("consistent create intent"),
                     true,
                 )
                 .await

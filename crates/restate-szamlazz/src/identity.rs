@@ -549,8 +549,8 @@ pub enum InvalidCorrectionId {
     Reserved(String),
 }
 
-/// A caller-supplied invoice number (`számlaszám`), as the by-number requests
-/// take it: `Szamlazz.Agent.query`'s selector, `set_credit_entries`, `storno`,
+/// A caller-supplied invoice number (`számlaszám`), as mutation requests
+/// take it: `set_credit_entries`, `storno`,
 /// `Szamlazz.Order.storno_invoice`, the base of `correct_invoice` and the
 /// `options.proforma: {number}` link.
 ///
@@ -566,6 +566,7 @@ pub enum InvalidCorrectionId {
 /// Distinct from `szamlazz_agent::InvoiceNumber`, the unvalidated wire type a
 /// number szamlazz.hu *reports* is carried in; the worker's response types
 /// echo numbers as plain strings.
+/// Exact read selectors instead take [`crate::contract::ProviderDocumentNumber`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InvoiceNumber(String);
 
@@ -695,6 +696,13 @@ pub enum InvalidInvoiceNumber {
 /// unique server-side (a query returns the newest holder), so every document
 /// found by it is validated before it is trusted.
 ///
+/// Accepted alias: order `by-number` reversing invoice `storno` and unmanaged
+/// reversal of invoice `storno` both produce `{namespace}:by-number:storno:storno`.
+/// These existing discovery handles are preserved. They name the same original;
+/// the services verify its order association before choosing the managed or
+/// unmanaged path, and reconciliation verifies the reversal's original reference.
+/// An external id is neither an authorization boundary nor a send permission.
+///
 /// Every composition stays within [`MAX_LEN`](Self::MAX_LEN) bytes because
 /// its parts are bounded (the namespace at 16, the [`OrderKey`], the
 /// [`CorrectionId`] and the [`InvoiceNumber`] at 40 each), which the
@@ -722,8 +730,8 @@ impl ExternalId {
 
     /// The character between an id's segments. Excluded from every
     /// caller-supplied segment (the [`Namespace`], the [`OrderKey`], the
-    /// [`CorrectionId`] and the invoice number), so no composition can read
-    /// as another.
+    /// [`CorrectionId`] and the invoice number), so segment boundaries remain
+    /// unambiguous. The accepted managed/unmanaged storno alias is described above.
     pub const SEPARATOR: char = ':';
 
     /// The segment token of a storno's id (`…:storno:{number}`,
@@ -1102,6 +1110,25 @@ mod tests {
         );
         let json = serde_json::to_string(&ExternalId::new("x:y:invoice")).expect("serialize");
         assert_eq!(json, "\"x:y:invoice\"");
+    }
+
+    #[test]
+    fn managed_and_unmanaged_storno_keep_the_accepted_discovery_alias() {
+        let order = OrderKey::parse("by-number").expect("supported order");
+        let number: InvoiceNumber = "storno".parse().expect("supported invoice number");
+        let managed = ExternalId::for_storno(&namespace(), &order, &number);
+        let unmanaged = ExternalId::for_unmanaged_storno(&namespace(), &number);
+        assert_eq!(managed.as_str(), "acct:by-number:storno:storno");
+        assert_eq!(managed, unmanaged);
+
+        // Preserve case and segment order; the alias is this exact composition.
+        for other in ["STORNO", "SZ-1"] {
+            let other = other.parse().expect("number");
+            assert_ne!(
+                ExternalId::for_storno(&namespace(), &order, &other),
+                ExternalId::for_unmanaged_storno(&namespace(), &other)
+            );
+        }
     }
 
     /// Every composable external id stays within [`ExternalId::MAX_LEN`],

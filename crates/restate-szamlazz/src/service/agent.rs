@@ -5,8 +5,9 @@
 //!
 //! No handler compares the document it finds with the account the invocation
 //! resolved to: the worker holds no account pin; which account a key opens
-//! is the operator's go-live check. Every read (the probe, `query`,
-//! `query_taxpayer`) runs under the read policy; `set_credit_entries` is a write
+//! is the operator's go-live check. The probe and `query_taxpayer` run under the
+//! read policy; `query` uses the explicit-query policy, inheriting the read
+//! policy when no override is configured. `set_credit_entries` is a write
 //! without a retry of its own, and with `additive: true` an at-least-once
 //! one (see [`SetCreditEntriesRequest::additive`]).
 
@@ -199,7 +200,8 @@ impl Execution {
         ))
     }
 
-    /// The `query` handler: one durable step (`query`) under the read policy
+    /// The `query` handler: one durable step (`query`) under the explicit-query
+    /// policy (inheriting the read policy when no override is configured),
     /// journaling the response projection, including minimal buyer identity
     /// and per-VAT subtotals. It carries `test` (`teszt`)
     /// as szamlazz.hu reported it, compared with nothing. Seller verification
@@ -210,9 +212,13 @@ impl Execution {
         request: QueryRequest,
     ) -> Result<QueryResponse, HandlerError> {
         let selector = request.selector;
-        let outcome = run_reading(ctx, "query", self, move |gateway| async move {
-            gateway.query(&selector).await
-        })
+        let outcome = super::support::run_reading_with_policy(
+            ctx,
+            "query",
+            self.config.query_retry_policy(),
+            self,
+            move |gateway| async move { gateway.query(&selector).await },
+        )
         .await?;
         query_response(outcome, &self.config.namespace).map_err(HandlerError::from)
     }

@@ -1,39 +1,59 @@
-# Exhausted retries kill the invocation instead of pausing it
+# Exhausted retries: retained Order writes and unkeyed kill policy
 
 Status: partially superseded by [ADR 0005](0005-stateless-order-szamlazz-hu-is-the-source-of-truth.md);
 amended by #22 (the create step under a run retry policy), #30 (the storno step), #37 (the read policy), #41
 (the `Szamlazz.Agent` writes' timeouts and retry interval), #61 (the ≥ 90 s re-check rule in code), #87 (what
 an invocation attempt is spent on; `Szamlazz.Agent.storno` on `Order`'s policy; the read policy widened) and #114
 (every wait has a bound), below.
-Current implementation: `on_max_attempts = "kill"` on every handler that calls szamlazz.hu. The #205 decision
-below selects retention plus a marker for a follow-up; it is not implemented by this amendment. Still holds: the verified Restate facts and
-the operational alerts; the retry policy and timeout values hold as amended (#41, #61, #87, #114, the current values are
-in the paragraph below and in the code). Withdrawn by #87: the third "considered option"'s etiquette rationale
-(etiquette bounds sends, which the issue policy governs, not invocation attempts). Kill itself is under review for
-the `Order` writes (#87's follow-up). Superseded: the `pending` slot as what makes
-kill safe (there is currently no state; query-first alone does not establish safety after an unanswered send), the runbook and caller
-contract phrased in terms of `request_id` (→ retry with a **new** `Idempotency-Key`, since a stored failure is
-replayed under the same key), the operator handlers, and `idempotency_retention = 7d` (the code sets `30d`).
+**Current implementation (#216 and release hardening):** protected Order mutations retain read-only
+reconciliation and **pause** on invocation exhaustion. A pre-send unresolved-write marker survives cancellation
+and kill and blocks later mutations until conclusive settlement. `recover` also pauses; ordinary read handlers
+and unkeyed Agent writes retain **kill**. Query-first absence alone never settles a potentially effective write.
+The current [protocol](../design/order-write-protocol.md) and [recovery runbook](../operations/order-recovery.md)
+supersede the original kill/no-state and automatic-new-key guidance below.
+
+Keep the original `Idempotency-Key` while unfinished, including pause. After completed uncertainty, settle the
+exact earlier request and exclude delayed execution before deliberate renewal. Kill releases the lock, not
+external effects or marker state. The historical `pending` slot is gone; the minimal unresolved-write marker
+is the sole Order state. Recovery is evidence-carrying, and write idempotency retention is `30d`, not `7d`.
+The dated amendments below retain the history of the decision; descriptions of then-current behavior are not
+the current contract. #87 withdrew the invocation-attempt etiquette rationale: retry thresholds are not send caps.
 
 Restate's server-wide default retry policy is `initial-interval 500ms`, factor 2, `max-interval 1m`,
 `max-attempts 70`, `on-max-attempts pause`, about an hour of back-off followed by an indefinite
 pause awaiting a human (the reference page; the guides disagree with each other on the initial
-interval, so the policy is pinned in code and never left to the default). `on_max_attempts` is a
+interval, so handlers declare defaults in discovery). `on_max_attempts` is a
 per-handler setting in Rust SDK 0.12 and the server honors it (verified: `GET /services/{name}`
 shows the effective `retry_policy`; the `POST /deployments` response shows `null`s and is not
 authoritative).
 
-Every handler that calls szamlazz.hu sets `on_max_attempts = "kill"`. On `Szamlazz.Order` the issuing,
-correcting, storno and delete handlers carry `invocation_retry_policy(initial_interval = "2m",
-factor = 2.0, max_interval = "10m", max_attempts = 5, on_max_attempts = "kill")` with
-`inactivity_timeout = "4m"` and `abort_timeout = "3m"` (the create closure may take up to 180 s:
-the leading external-id query, the create, a re-query, 60 s each), and so does `Szamlazz.Agent.storno` (#87).
-`Szamlazz.Agent.set_credit_entries` uses `initial_interval = "2m", max_attempts = 2, kill` (its timeouts and retry
-interval: #41 and #61, below; why two: #87); read-only handlers (`Szamlazz.Order.get`, `Szamlazz.Agent.query`, `query_taxpayer`, `check_account`) may retry more freely
-because queries are safe to repeat (`initial_interval = "10s", factor = 2.0, max_interval = "1m", max_attempts = 3`, pinned on
-every one of them since the Restate-conventions review, so no server default leaks through), but they kill too. The external-id query inside the create step
-is the next invocation's reconciliation mechanism; kill keeps the key reachable but does not establish that
-an external send has stopped processing (#205).
+### Current discovery defaults and timeout sizing
+
+| Handler | Invocation policy | Inactivity / abort |
+|---|---|---|
+| Order create/correct/delete | 5 attempts, 2m → 10m doubling, pause | 4m / 3m |
+| Order `storno_invoice` | 5 attempts, 2m → 10m doubling, pause | **6m / 3m** |
+| Order `recover` | 3 attempts, 10s → 1m doubling, pause | 4m / 3m |
+| Order `get`; Agent query/taxpayer/probe | 3 attempts, 10s → 1m doubling, kill | 2m / 2m |
+| Agent `storno` | 5 attempts, 2m → 10m doubling, kill | 4m / 3m |
+| Agent `set_credit_entries` | 2 attempts, 2m initial interval, kill | 2m / 2m |
+| Order `observe_unresolved` | inherited | inherited |
+
+The Rust host may override discovery defaults through SDK `ServiceOptions` / `HandlerOptions` before binding.
+Apply the override to each intended handler and retain pause for protected mutations and recovery. The
+server-wide maximum-attempts ceiling can cap a handler's requested value. Inspect effective service/handler
+settings after registration. On server 1.7.8 retry policies are deployment settings, not a live admin policy
+patch; registering new settings does not retune an existing invocation's pinned deployment. Resume on that
+deployment unless exceptional replay has been reviewed under ADR 0009.
+
+Sizing accounts for sequential client deadlines **and bounded initialization**. Protected storno reconciliation
+can make five reads in one run: candidate/original verification, then fallback external-id discovery and
+candidate/original verification. Five 60-second client deadlines plus credential fetch's three ten-second
+deadlines and two 200 ms pauses fit the new six-minute inactivity interval with margin. Account resolution has
+its separate ten-second call deadline. Other three-trip paths retain four-minute inactivity; one-trip reads
+and credit registration retain two minutes. Successful journal progress affects inactivity, so these are not
+whole-invocation deadlines. Abort still starts only after suspension is requested and does not fence vendor
+execution. Only Order `storno_invoice` changes from 4m to 6m; its abort stays 3m.
 
 ## Verified Restate facts
 
@@ -52,7 +72,7 @@ an external send has stopped processing (#205).
 - An ingress `Idempotency-Key` replays a stored terminal failure for the retention period without
   re-executing (same invocation id, identical body).
 
-## Considered options
+## Historical considered options (superseded for protected Order writes)
 
 - **The server default (`pause` after 70 attempts).** Rejected: a stuck `Order` invocation holds the
   order's key for ~63 minutes of back-off and then until a human resumes or kills it. Every
@@ -309,9 +329,9 @@ No custom deadline engine is needed for these corrections.
 
 `get` is a non-atomic external observation with separately journaled reads and fresh invocation/key per new poll
 (ADR 0005); native attach/output answers whether a particular invocation completed. Kill and exhausted writes
-may leave a send processing: [#205](https://github.com/sagikazarmark/szamlazz-rs/issues/205) owns the unresolved-write
-policy, and [#45](https://github.com/sagikazarmark/szamlazz-rs/issues/45) the broader operational runbook. The
-configuration above remains the current behavior, not proof that absence authorizes an immediate reissue.
+may leave a send processing. The implemented #205/#216 protection below retains that uncertainty;
+[#45](https://github.com/sagikazarmark/szamlazz-rs/issues/45) owns the broader operational runbook.
+Absence never authorizes an immediate reissue after an unresolved send.
 
 ## Unresolved Order writes (#205, 2026-09-10)
 
@@ -323,8 +343,8 @@ boundary are [specified here](../design/order-write-protocol.md). Unkeyed Agent 
 **Decision: retain the original invocation for read-only reconciliation, with pause on unresolved recovery or
 invocation-policy exhaustion, plus a minimal durable unresolved-write marker armed before sending.** The owner
 explicitly selected “Retain plus marker” after reviewing the reproduction and alternatives. This is the approved
-direction and bounded [implementation brief](../design/unresolved-order-writes.md), not a production recovery
-change in #205. The current terminal run exhaustion and kill attributes remain until that work lands.
+direction recorded in the bounded [implementation brief](../design/unresolved-order-writes.md).
+#216 implemented it; the current contract is the [protected Order protocol](../design/order-write-protocol.md).
 
 The required protection is order-wide: no subsequent mutation may send while an earlier send might still act,
 including correctives and cross-kind creates. Retention protects queued invocations while the owner reconciles;
@@ -365,8 +385,9 @@ and the older consequences below; #45 supplies the broader operational runbook.
 
 ## Consequences
 
-- Kill releases the key without compensating external effects. The next create queries by external id before
-  considering a send; absence alone does not establish that the earlier send cannot still land (#205).
+- Kill releases the key without compensating external effects or clearing the unresolved marker. Later Order
+  mutations fail closed on that marker before account resolution. Resume read-only reconciliation or submit
+  authorized evidence through recovery; absence alone does not establish that the earlier send cannot still land.
 - Historical caller contract, superseded for renewal permission by #205 above: **any error from an issuing or storno handler
   means "outcome unknown, retry with a **new** `Idempotency-Key`, or read `Szamlazz.Order.get`"**,
   never "no document exists". A call that timed out on the client side may still run once the key
@@ -376,13 +397,16 @@ and the older consequences below; #45 supplies the broader operational runbook.
   rule to `outcome_unknown`, `unavailable` and `credentials_rejected`; the settled 4xx/422 faults
   are not "outcome unknown", design §7.)
 - Operations: alert on `sys_invocation` failed completions, on invocations in `backing-off` for
-  more than 5 minutes and on any invocation `paused` (none is expected under kill; one is a policy
-  override or a server default leaking through); `idempotency_retention = 30d` keeps failed completions
+  more than 5 minutes and on paused owners/recovery invocations. Pause is expected protection requiring attention,
+  not evidence of a leaked server default. Monitor unresolved markers after completed/killed owners too;
+  `idempotency_retention = 30d` keeps failed completions
   visible. Verify the effective policy with `GET /services/{name}`. After a worker outage,
   `restate invocations resume Szamlazz.Order` pulls the backing-off invocations forward instead of
   waiting out their intervals (#87). The SDK endpoint speaks HTTP/2 only.
-- Recovery: establish invocation completion with attach/output, reconcile through fresh `get` observations,
-  then deliberately renew an operation only if still intended. #205 owns unresolved-write exhaustion/kill.
+- Recovery: inspect the exact marker with `observe_unresolved` and the owner with attach/output. Prefer resume
+  on its pinned deployment. Exclusive operator settlement requires quiescing producers and stopping a paused
+  owner first; preserve the marker and submit evidence through `recover`. `get` is only an external observation,
+  not settlement. Deliberate renewal needs settled uncertainty and the original expected-document intent.
 - In a pathological crash loop the run execution count and elapsed duration can exceed the configured
   thresholds; no hard external-send bound follows from multiplying or adding the two policies' counts.
 - Because there is no child Restate service (ADR 0001), the "callee pauses and strands the parent"

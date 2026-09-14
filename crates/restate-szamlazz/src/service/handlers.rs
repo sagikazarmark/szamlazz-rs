@@ -221,6 +221,8 @@ impl Order {
     }
 
     /// Reverses (`sztornó`) an invoice of this order; idempotent.
+    /// Retained reconciliation can make five sequential reads in one run;
+    /// six minutes allows those client deadlines plus bounded gateway initialization.
     #[handler(
         invocation_retry_policy(
             initial_interval = "2m",
@@ -229,7 +231,7 @@ impl Order {
             max_attempts = 5,
             on_max_attempts = "pause"
         ),
-        inactivity_timeout = "4m",
+        inactivity_timeout = "6m",
         abort_timeout = "3m",
         journal_retention = "3d",
         idempotency_retention = "30d"
@@ -296,7 +298,8 @@ impl Order {
     /// attach/output to learn whether a particular invocation completed.
     /// The journal is retained a day for inspection. The retry policy is the reads'
     /// (`10s → 1m`, three attempts, the same as `Szamlazz.Agent.query`'s):
-    /// pinned like every other handler's, so no server default leaks through.
+    /// declared in discovery; host overrides and the server's attempt ceiling
+    /// still apply. Existing invocations retain their pinned deployment.
     /// The timeouts are the reads': a read step is one round trip bounded by
     /// the 60 s client timeout, and szamlazz.hu has been seen to stall for a
     /// minute and still answer, so the server's 1 m default would suspend
