@@ -59,3 +59,17 @@ Order's send protection to it.
 See the [public contract](../../crates/restate-szamlazz/README.md#gateway-and-services) and
 [protected protocol](../design/order-write-protocol.md). This decision records no new vendor
 observations or test executions.
+
+## 2026-09-14 amendment: validated create identity
+
+`CreateStepRequest` now has private fields and a fallible constructor. It checks exact agreement
+between the outbound create and the external id, order, issued kind and independently supplied
+corrective base used for discovery and retained evidence. Unsupported kinds and contradictory
+corrective intent are refused before any query or send; the immutable borrow keeps the checked
+outbound request unchanged while the descriptor exists.
+
+We enforce this locally rather than assigning it to expert callers: a mismatched descriptor could
+send one document and positively reconcile another. Unlike durable admission and exclusion, both
+sides of this identity check are available before sending. Financial-payload comparison and provider
+acceptance remain outside the check. This is a breaking Rust construction change; it does not add
+durable protection to the Gateway or alter the caller's permission and settlement obligations.

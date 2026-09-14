@@ -29,13 +29,15 @@ async fn retained_corrective_intent_reconciles_without_another_send() {
             },
         )
         .expect("build corrective");
-    let request = CreateStepRequest {
-        external_id: &id,
-        order: &order,
-        kind: IssuedKind::Corrective,
-        create: &create_request,
-        reversed: None,
-    };
+    let request = CreateStepRequest::new(
+        &id,
+        IssuedKind::Corrective,
+        &order,
+        &create_request,
+        None,
+        Some("SZ-BASE"),
+    )
+    .expect("consistent corrective intent");
     // The expert caller retains intent before granting its sole send permission.
     let retained = serde_json::to_string(&request.operation()).expect("retain intent");
     external_id_query(id.as_str())

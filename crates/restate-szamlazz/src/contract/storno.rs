@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{ConflictReason, DocumentKind, InvoiceNumber};
 
+super::object::object_input! {
 /// Input of `Szamlazz.Order.storno_invoice` and `Szamlazz.Agent.storno`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct StornoRequest {
@@ -29,6 +30,7 @@ pub struct StornoRequest {
     /// Retain this value across retries; a reversal never proves email delivery.
     #[serde(default)]
     pub buyer_email: Option<StornoRecipient>,
+}
 }
 
 impl StornoRequest {
@@ -364,8 +366,9 @@ pub enum DeleteMode {
     NamedTarget,
 }
 
+super::object::object_input! {
 /// Input of `Szamlazz.Order.delete_proforma`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DeleteProformaRequest {
@@ -384,6 +387,7 @@ pub struct DeleteProformaRequest {
     /// checks, and the fresh query and delete are not atomic against other writers.
     #[serde(default)]
     pub force: bool,
+}
 }
 
 impl DeleteProformaRequest {
@@ -632,14 +636,26 @@ pub struct DocumentStatus {
     /// Gross total.
     #[serde(default, deserialize_with = "super::decimal::optional")]
     #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "super::decimal::optional_output_schema")
+    )]
     pub gross: Option<Decimal>,
     /// Net total.
     #[serde(default, deserialize_with = "super::decimal::optional")]
     #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "super::decimal::optional_output_schema")
+    )]
     pub net: Option<Decimal>,
     /// Registered credit entry amounts, in the order szamlazz.hu lists them.
     #[serde(default, deserialize_with = "super::decimal::deserialize_vec")]
     #[serde(serialize_with = "super::decimal::serialize_vec")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "super::decimal::vec_output_schema")
+    )]
     pub credit_entries: Vec<Decimal>,
     /// The proforma this document converted (`hivdijbekszam`).
     #[serde(default)]

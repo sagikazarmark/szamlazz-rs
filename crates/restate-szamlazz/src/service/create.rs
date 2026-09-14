@@ -203,6 +203,8 @@ struct Refs {
 struct Intent {
     identity: Identity,
     create: CreateInvoice,
+    /// The independently verified base of a corrective.
+    corrected_number: Option<String>,
     reissue: Option<Reissue>,
     /// Numbers known to be ours; the hint ignores them.
     our_numbers: Vec<String>,
@@ -635,6 +637,7 @@ impl Execution {
         let intent = Intent {
             identity,
             create,
+            corrected_number: None,
             reissue: prepared.reissue,
             our_numbers: refs.our_numbers,
         };
@@ -687,6 +690,7 @@ impl Execution {
         let intent = Intent {
             identity,
             create,
+            corrected_number: Some(number),
             reissue: None,
             our_numbers: Vec::new(),
         };
@@ -949,12 +953,7 @@ impl Execution {
         let kind = intent.identity.kind;
         let order = order.clone();
         let our_numbers = intent.our_numbers.clone();
-        let corrected_number = match &intent.create.kind {
-            szamlazz_agent::ops::invoice::InvoiceKind::Corrective { corrected_number } => {
-                Some(corrected_number.to_string())
-            }
-            _ => None,
-        };
+        let corrected_number = intent.corrected_number.clone();
         run_reading(
             ctx,
             format!("lookup-{kind}"),
@@ -1003,13 +1002,15 @@ impl Execution {
         reversed: Option<String>,
     ) -> Result<gateway::CreateOutcome, HandlerError> {
         let kind = intent.identity.kind;
-        let request = CreateStepRequest {
-            external_id: &intent.identity.external_id,
+        let request = CreateStepRequest::new(
+            &intent.identity.external_id,
             kind,
             order,
-            create: &intent.create,
-            reversed: reversed.as_deref(),
-        };
+            &intent.create,
+            reversed.as_deref(),
+            intent.corrected_number.as_deref(),
+        )
+        .map_err(|error| Fault::invalid_input(error.to_string()))?;
         let result = self
             .protected_write(
                 ctx,

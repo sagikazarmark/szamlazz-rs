@@ -61,6 +61,36 @@ pub(super) fn optional_schema(generator: &mut schemars::SchemaGenerator) -> sche
     schema
 }
 
+/// The emitted representation, deliberately narrower than the exact decoder:
+/// Decimal's Display uses fixed-point strings, never JSON numbers or exponents.
+#[cfg(feature = "schemars")]
+pub(crate) fn output_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "pattern": r"^-?[0-9]+(?:\.[0-9]+)?$",
+        "not": {"pattern": r"[\r\n\u2028\u2029]"}
+    })
+}
+
+#[cfg(feature = "schemars")]
+pub(crate) fn optional_output_schema(
+    generator: &mut schemars::SchemaGenerator,
+) -> schemars::Schema {
+    let mut schema = output_schema(generator);
+    schema.insert("type".into(), serde_json::json!(["string", "null"]));
+    // `pattern` alone ignores null, but an untyped `not: {pattern: ...}` does not.
+    schema.insert(
+        "not".into(),
+        serde_json::json!({"type": "string", "pattern": r"[\r\n\u2028\u2029]"}),
+    );
+    schema
+}
+
+#[cfg(feature = "schemars")]
+pub(super) fn vec_output_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type": "array", "items": output_schema(generator)})
+}
+
 fn parse<E: serde::de::Error>(text: &str) -> Result<Decimal, E> {
     szamlazz_agent::parse_decimal(text).map_err(|error| {
         E::custom(format!(

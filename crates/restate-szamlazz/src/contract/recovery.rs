@@ -11,8 +11,9 @@ pub type EvidenceNumber = super::ProviderDocumentNumber;
 /// A recovery number that cannot identify a queryable document.
 pub type InvalidEvidenceNumber = super::InvalidProviderDocumentNumber;
 
+super::object::object_input! {
 /// Recovery intent without buyer data, line items, XML or credentials.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum WriteOperation {
@@ -36,6 +37,7 @@ pub enum WriteOperation {
         /// Pinned proforma number.
         number: String,
     },
+}
 }
 
 /// Schema version accepted by this deployment. Unknown versions fail closed.
@@ -70,9 +72,10 @@ impl<'de> Deserialize<'de> for MarkerVersion {
     }
 }
 
+super::object::object_input! {
 /// The sole Order state: a possibly effective write awaiting conclusive evidence.
 /// Its schema crosses deployments and is deliberately closed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct UnresolvedWrite {
@@ -104,6 +107,7 @@ pub struct UnresolvedWrite {
     pub credential_ref: String,
     /// Minimal operation-specific recovery intent.
     pub operation: WriteOperation,
+}
 }
 
 fn exact_order_key<'de, D: Deserializer<'de>>(de: D) -> Result<OrderKey, D::Error> {
@@ -183,10 +187,11 @@ impl<'de> Deserialize<'de> for CompletionAttestation {
     }
 }
 
+super::object::object_input! {
 /// The operation-specific result independently established by an operator.
 /// The audit record must tie it to the exact marker, including corrective base
 /// or reissue intent. Merely observing an absent document is insufficient.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum AttestedCompletion {
@@ -206,9 +211,11 @@ pub enum AttestedCompletion {
         number: crate::identity::InvoiceNumber,
     },
 }
+}
 
+super::object::object_input! {
 /// Evidence an authorized operator submits; no generic clearance exists.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum RecoveryEvidence {
@@ -236,10 +243,12 @@ pub enum RecoveryEvidence {
         completed_and_cannot_execute_later: CompletionAttestation,
     },
 }
+}
 
+super::object::object_input! {
 /// Exclusive operator recovery; the complete marker must match exactly.
 /// The host authenticates and authorizes the caller before invoking recovery.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct RecoveryRequest {
@@ -262,6 +271,7 @@ pub struct RecoveryRequest {
     /// Evidence permitting settlement, never permission to send.
     pub evidence: RecoveryEvidence,
 }
+}
 
 fn nonblank_operator<'de, D: Deserializer<'de>>(de: D) -> Result<String, D::Error> {
     let operator = String::deserialize(de)?;
@@ -276,7 +286,6 @@ fn nonblank_operator<'de, D: Deserializer<'de>>(de: D) -> Result<String, D::Erro
 /// Shared observation available even while the owner is paused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 pub enum UnresolvedObservation {
     /// No unresolved marker.
@@ -297,6 +306,30 @@ pub enum UnresolvedObservation {
         #[serde(flatten)]
         fields: serde_json::Map<String, serde_json::Value>,
     },
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for UnresolvedObservation {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "UnresolvedObservation".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::UnresolvedObservation").into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // The closed UnresolvedWrite schema is the recovery *input* contract.
+        // Observation must retain even an unreadable/newer marker as opaque JSON.
+        schemars::json_schema!({
+            "type": "object",
+            "description": "Unresolved-write observation: absent, unreadable, or unresolved with a required marker. Unknown state strings and newer or unreadable marker values are preserved without authorizing recovery.",
+            "required": ["state"],
+            "properties": {"state": {"type": "string"}},
+            "if": {"properties": {"state": {"const": "unresolved"}}},
+            "then": {"required": ["marker"]}
+        })
+    }
 }
 
 impl<'de> Deserialize<'de> for UnresolvedObservation {

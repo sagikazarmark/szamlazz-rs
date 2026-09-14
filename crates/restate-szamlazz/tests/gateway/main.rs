@@ -25,6 +25,7 @@ mod harness;
 
 mod agent_writes;
 mod create;
+mod create_request;
 mod credentials;
 mod duplicate;
 mod lookup;

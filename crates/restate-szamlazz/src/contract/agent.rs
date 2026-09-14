@@ -17,13 +17,15 @@ use super::{InvoiceNumber, ProviderDocumentNumber, outstanding};
 use crate::account::Account;
 use crate::gateway::{FoundDocument, RecordedCreditEntry};
 
+super::object::object_input! {
 /// Input of `Szamlazz.Agent.query`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct QueryRequest {
     /// Which document to look up.
     pub selector: Selector,
+}
 }
 
 impl QueryRequest {
@@ -124,14 +126,26 @@ pub struct QueryResponse {
     /// Net total.
     #[serde(default, deserialize_with = "super::decimal::optional")]
     #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "super::decimal::optional_output_schema")
+    )]
     pub net_total: Option<Decimal>,
     /// VAT total.
     #[serde(default, deserialize_with = "super::decimal::optional")]
     #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "super::decimal::optional_output_schema")
+    )]
     pub vat_total: Option<Decimal>,
     /// Gross total.
     #[serde(default, deserialize_with = "super::decimal::optional")]
     #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "super::decimal::optional_output_schema")
+    )]
     pub gross_total: Option<Decimal>,
     /// Registered credit entries.
     #[serde(default)]
@@ -141,6 +155,10 @@ pub struct QueryResponse {
     /// cannot be represented exactly as a decimal.
     #[serde(default, deserialize_with = "super::decimal::optional")]
     #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "super::decimal::optional_output_schema")
+    )]
     pub outstanding: Option<Decimal>,
     /// Issued from a test account (`teszt`), as szamlazz.hu reported it:
     /// compared with nothing by the worker. This projection omits the seller
@@ -214,14 +232,26 @@ pub struct VatTotal {
     /// Exact net subtotal (`netto`), serialized as a decimal string.
     #[serde(deserialize_with = "super::decimal::required")]
     #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "super::decimal::output_schema")
+    )]
     pub net: Decimal,
     /// Exact VAT subtotal (`afa`), serialized as a decimal string.
     #[serde(deserialize_with = "super::decimal::required")]
     #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "super::decimal::output_schema")
+    )]
     pub vat: Decimal,
     /// Exact gross subtotal (`brutto`), serialized as a decimal string.
     #[serde(deserialize_with = "super::decimal::required")]
     #[serde(serialize_with = "rust_decimal::serde::str::serialize")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "super::decimal::output_schema")
+    )]
     pub gross: Decimal,
 }
 
@@ -281,8 +311,9 @@ impl From<&FoundDocument> for QueryResponse {
     }
 }
 
+super::object::object_input! {
 /// Input of `Szamlazz.Agent.query_taxpayer`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct QueryTaxpayerRequest {
@@ -291,6 +322,7 @@ pub struct QueryTaxpayerRequest {
     /// Nothing else (no whitespace, no other separator) is accepted; the
     /// handler refuses anything else as `invalid_input`.
     pub tax_number: String,
+}
 }
 
 impl QueryTaxpayerRequest {
@@ -460,8 +492,9 @@ impl From<AgentTaxpayerAddress> for TaxpayerAddress {
     }
 }
 
+super::object::object_input! {
 /// Input of `Szamlazz.Agent.set_credit_entries`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SetCreditEntriesRequest {
@@ -490,6 +523,7 @@ pub struct SetCreditEntriesRequest {
     #[serde(default)]
     pub additive: bool,
 }
+}
 
 impl SetCreditEntriesRequest {
     /// A replacing request: `entries` become the invoice's credit entries.
@@ -504,13 +538,16 @@ impl SetCreditEntriesRequest {
     }
 }
 
+super::object::object_input! {
 /// One credit entry (`jóváírás`) as the caller sends it: the input side of
 /// `RecordedCreditEntry`, with the same words (`title`, `comment`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreditEntryInput {
     /// The date of the credit entry.
+    #[serde(deserialize_with = "super::date::required")]
+    #[cfg_attr(feature = "schemars", schemars(schema_with = "super::date::schema"))]
     pub date: Date,
     /// The entry's title (`jogcim`): the payment method it was settled by.
     pub title: PaymentMethod,
@@ -522,6 +559,7 @@ pub struct CreditEntryInput {
     /// Free-text comment (`megjegyzes`).
     #[serde(default)]
     pub comment: Option<String>,
+}
 }
 
 impl CreditEntryInput {
@@ -555,10 +593,18 @@ pub struct SetCreditEntriesResponse {
     /// Outstanding amount after the update (`kintlévőség`).
     #[serde(default, deserialize_with = "super::decimal::optional")]
     #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "super::decimal::optional_output_schema")
+    )]
     pub outstanding: Option<Decimal>,
     /// Gross total of the invoice.
     #[serde(default, deserialize_with = "super::decimal::optional")]
     #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "super::decimal::optional_output_schema")
+    )]
     pub gross_total: Option<Decimal>,
 }
 

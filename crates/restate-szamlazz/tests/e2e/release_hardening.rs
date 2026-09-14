@@ -287,9 +287,16 @@ async fn e2e_release_invalid_documents_never_arm_a_write() {
                 .await;
             assert_eq!(reply.status, 400, "{handler}/{field}: {}", reply.body);
             assert_eq!(reply.fault::<Fault>().code, TerminalCode::InvalidInput);
+            // Date spelling/range is rejected during body decoding. Invalid
+            // document text still needs the normal preflight after the prologue.
+            let expected_runs: &[&str] = if field == "comment" {
+                &["namespace", "account"]
+            } else {
+                &[]
+            };
             assert_eq!(
                 restate.admin().runs(reply.invocation_id()).await,
-                ["namespace", "account"]
+                expected_runs
             );
             assert_eq!(
                 restate

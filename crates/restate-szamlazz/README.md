@@ -305,6 +305,28 @@ exceptional replay requires reviewing the actual retained prefix, branch logic,
 exact commands, serialization and inputs against the candidate code. This local
 shape description is not a general cross-release replay guarantee.
 
+### Release hardening migration
+
+- Request records must be JSON objects, including nested records. Positional arrays are refused as
+  `invalid_input`; send named fields and keep the closed request contract.
+- Request dates must be real calendar dates in exact `YYYY-MM-DD` form, with years `0001`–`9999`.
+  Remove timestamps, timezone suffixes, signed/extended years and alternative spellings before submission;
+  do not silently change the caller's intended civil date.
+- Expert Gateway callers must build `CreateStepRequest` through its validated constructor rather than a
+  struct literal. Handle construction failure before granting send permission; validation does not supply
+  durable exclusion or settle an earlier write. Use
+  `CreateStepRequest::new(&external_id, kind, &order, &create, reversed, corrected_number)?`:
+  the intended corrective base is `Some(number)` for correctives and `None` otherwise. Construction checks
+  exact agreement with the outbound external id, order, kind and corrective base before any query or send.
+  Retain `request.operation()` before granting send permission.
+- Output discovery now describes monetary values as decimal strings (or `null` when optional), including
+  credit-entry arrays. Exact response decoders still accept representable numeric JSON and decimal strings.
+  `UnresolvedObservation` requires `marker` for `state: unresolved`, while preserving newer markers and
+  unknown states for inspection without authorizing recovery.
+
+Register a new immutable deployment and regenerate discovery-based clients. Existing invocations remain on
+their pinned deployment; review actual inputs and journal prefixes before exceptional replay (ADR 0009).
+
 ## Scope Contract
 
 ### What `Szamlazz.Order` guarantees
@@ -336,6 +358,12 @@ live. Running without it is unsupported.
 
 **Deterministic external ids**, derived from the order key alone, so that a re-executed closure or a new
 invocation can discover documents without a document ledger. Unresolved-write state guards permission to mutate.
+
+**Accepted storno alias:** order `by-number` reversing invoice `storno` and unmanaged reversal of invoice
+`storno` both use `{namespace}:by-number:storno:storno`. These existing identifiers are preserved. Both refer
+to the same original number; the services verify its order association before selecting the managed or
+unmanaged path, and reversal evidence must name that original. External-id equality grants neither ownership
+nor permission to send.
 
 **Validation of every found document**: order number and `tipus`, because external ids are not unique
 server-side and a query returns the newest holder. Nothing about the account: the worker holds **no account
@@ -1098,13 +1126,21 @@ earlier write before deliberately renewing; a fresh `get` remains an observation
 
 ### Retry policy
 
-Every handler that calls szamlazz.hu pins its own invocation retry policy.
+Every handler that calls szamlazz.hu declares invocation retry defaults in discovery. A Rust host can override
+them with SDK `ServiceOptions` / `HandlerOptions` before binding; apply overrides to the intended handlers
+and retain pause-on-exhaustion for protected mutations and recovery. Restate's server-wide maximum-attempts
+ceiling can cap the requested handler value. Inspect the effective service/handler settings after registration,
+not just the SDK manifest or the `POST /deployments` reply. On server 1.7.8 these are deployment settings,
+not a live admin retry-policy patch: existing invocations stay on their pinned deployment, and registering a
+new one does not retune them. Resume on the pinned deployment unless exceptional replay has been reviewed.
 
 | Handler | Attempts | Interval | Timeouts (inactivity / abort) | Journal retention |
 |---|---|---|---|---|
-| `Szamlazz.Order` writes (`create_*`, `correct_invoice`, `storno_invoice`, `delete_proforma`) | 5, pause | 2m → 10m, factor 2 | 4m / 3m | 3d (idempotency 30d) |
+| `Szamlazz.Order` writes (`create_*`, `correct_invoice`, `delete_proforma`) | 5, pause | 2m → 10m, factor 2 | 4m / 3m | 3d (idempotency 30d) |
+| `Szamlazz.Order.storno_invoice` | 5, pause | 2m → 10m, factor 2 | 6m / 3m | 3d (idempotency 30d) |
 | `Szamlazz.Order.get` | 3, kill | 10s → 1m, factor 2 | 2m / 2m | 1d |
 | `Szamlazz.Order.recover` | 3, pause | 10s → 1m, factor 2 | 4m / 3m | 30d |
+| `Szamlazz.Order.observe_unresolved` | inherited | inherited | inherited | inherited |
 | `Szamlazz.Agent.storno` | 5, kill | 2m → 10m | 4m / 3m | 3d |
 | `Szamlazz.Agent.set_credit_entries` | 2 | 2m | 2m / 2m | 3d |
 | `Szamlazz.Agent.query`, `query_taxpayer`, `check_account` | 3, kill | 10s → 1m, factor 2 | 2m / 2m | 1d |
@@ -1113,13 +1149,16 @@ Every handler that calls szamlazz.hu pins its own invocation retry policy.
 second copy of the entries. Inactivity timeout waits for progress before requesting SDK suspension;
 **abort timeout starts after that request** and bounds the subsequent wait before aborting the execution.
 They are not concurrent timers starting with the external call, nor a terminal invocation kill.
-The timeouts follow one sizing rule: a step's szamlazz.hu round trips at the client's 60 s
-`REQUEST_TIMEOUT` each, plus the margin a stalling szamlazz.hu needs. `4m` / `3m` where the step is three trips
-(the create and storno steps' leading query, send and re-query); `2m` / `2m` where it is one, which is
-`set_credit_entries`' send and every read step alike. The reads avoid the server's 1 m inactivity default, which
-could request suspension during a slow read; abort follows only if the SDK does not suspend within the further
-abort interval. The 2 m retry interval is longer than the client timeout and allows the observed server stall
-to settle; a client deadline does not prove that szamlazz.hu has stopped processing a request.
+The timeouts allow a run's sequential szamlazz.hu round trips at the client's 60 s `REQUEST_TIMEOUT`, plus
+bounded initialization and margin. Protected storno reconciliation can make **five reads** in one run:
+candidate and original verification, then fallback external-id discovery and its candidate/original
+verification. `storno_invoice` therefore uses **6m inactivity / 3m abort**. Three-trip create and unmanaged
+storno paths retain `4m` / `3m`; one-trip reads and `set_credit_entries` retain `2m` / `2m`.
+Credential initialization can consume three ten-second fetch deadlines and two 200 ms pauses; account
+resolution has its separate ten-second call deadline. Completed runs replay without initialization.
+The reads avoid the server's 1 m inactivity default, which could request suspension during a slow read;
+abort follows only if the SDK does not suspend within the further abort interval. The 2 m retry interval
+allows visibility time, but a client deadline does not prove that szamlazz.hu has stopped processing a request.
 
 **An invocation attempt is spent on retained read-only reconciliation or a worker-side failure** (the worker unreachable, a rollout cutting the
 connection, the abort timeout, an undecodable journal), not on an explicitly delayed run retry: a step re-executed under `[issue]`,
@@ -1239,8 +1278,10 @@ Protected `reconcile-write` instead uses the mutation's invocation policy descri
 
 **The protected create** (`create-{kind}`) consumes one execution-local send permission after durable arming.
 Its fresh leading query allows an ordinary create only when the external id holds **nothing**, and reissue
-only past **exactly the expected reversed document**. An absent reissue target before the write step is
-`conflict{target_changed}`; inside the write step it remains `outcome_unknown`:
+only past **exactly the expected reversed document**. An absent reissue target before arming or at the
+permitted final pre-send check is `conflict{target_changed}`, with nothing sent. Absence during read-only
+reconciliation after a potentially effective send instead retains the marker and uncertainty.
+Other settled leading-query answers before a send are:
 
 - a live document an earlier execution issued is answered `issued` without sending;
 - a document reversed since the lookup is answered `reversed` without sending (a new document needs an explicit
@@ -1458,9 +1499,10 @@ remain possible; the mock lifecycle tests establish worker decisions, not vendor
 
 Drain legacy commands on their original immutable deployment before changing callers. Register this release
 as a new deployment; exceptional replay requires reviewing actual inputs and journal under ADR 0009. The
-create step adds the journaled `TargetChanged` outcome for an expected holder disappearing before a send,
-mapped to `outcome_unknown` because an earlier execution may have sent;
-completed old invocations keep their original results. See [ADR 0012](../../docs/adr/0012-expected-document-mutation-intent.md).
+create step's journaled `TargetChanged` outcome for an expected holder disappearing at the permitted
+pre-send check maps to `conflict{target_changed}`, with nothing sent. Replay without send permission instead
+reconciles read-only; absence there cannot settle a potentially effective earlier write.
+Completed old invocations keep their original results. See [ADR 0012](../../docs/adr/0012-expected-document-mutation-intent.md).
 
 Both operations preserve inconclusive send answers as journaled data. Protected Order deletion retains
 read-only reconciliation and pauses; cancellation returns `outcome_unknown` and preserves its marker.

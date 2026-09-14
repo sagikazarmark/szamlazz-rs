@@ -19,12 +19,13 @@ use szamlazz_agent::{Currency, ExchangeRate, LineItem, Rounding, VatRate};
 mod money;
 pub use money::{Amounts, MonetaryError, MonetaryPreflight};
 
+super::object::object_input! {
 /// One document to issue: everything the caller decides per call.
 ///
 /// The order number is not part of the input: it is the `Order` key. Account
 /// data, the seller block and the defaults come from the configuration;
 /// `overrides` can change a subset of them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DocumentInput {
@@ -33,8 +34,12 @@ pub struct DocumentInput {
     /// Line items (`tételek`); at least one is required.
     pub items: Vec<LineItemInput>,
     /// Fulfillment date (`teljesítés dátuma`).
+    #[serde(deserialize_with = "super::date::required")]
+    #[cfg_attr(feature = "schemars", schemars(schema_with = "super::date::schema"))]
     pub fulfillment_date: Date,
     /// Payment due date (`fizetési határidő`).
+    #[serde(deserialize_with = "super::date::required")]
+    #[cfg_attr(feature = "schemars", schemars(schema_with = "super::date::schema"))]
     pub due_date: Date,
     /// Payment method (`fizetési mód`).
     pub payment_method: PaymentMethod,
@@ -47,7 +52,8 @@ pub struct DocumentInput {
     /// Issue date (`kelt`). Leave unset to let szamlazz.hu date the document
     /// at issue time; a pinned date is journaled and re-sent unchanged on
     /// every execution.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::date::optional")]
+    #[cfg_attr(feature = "schemars", schemars(schema_with = "super::date::optional_schema"))]
     pub issue_date: Option<Date>,
     /// Per-call overrides of the configured defaults.
     #[serde(default)]
@@ -56,6 +62,7 @@ pub struct DocumentInput {
     /// A mismatch is refused before issuing. Omit when no total assertion is needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_totals: Option<Amounts>,
+}
 }
 
 impl DocumentInput {
@@ -84,11 +91,12 @@ impl DocumentInput {
     }
 }
 
+super::object::object_input! {
 /// Per-call overrides of the account's configured document defaults
 /// (`account::Defaults`).
 ///
 /// Every field is optional; an absent field keeps the configured value.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct DocumentOverrides {
@@ -110,9 +118,11 @@ pub struct DocumentOverrides {
     /// account.
     pub number_prefix: Option<String>,
 }
+}
 
+super::object::object_input! {
 /// Exchange rate information (`árfolyam`) for non-HUF documents.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ExchangeRateInput {
@@ -128,6 +138,7 @@ pub struct ExchangeRateInput {
     #[serde(serialize_with = "rust_decimal::serde::str_option::serialize")]
     pub rate: Option<Decimal>,
 }
+}
 
 impl From<ExchangeRateInput> for ExchangeRate {
     fn from(input: ExchangeRateInput) -> Self {
@@ -138,8 +149,9 @@ impl From<ExchangeRateInput> for ExchangeRate {
     }
 }
 
+super::object::object_input! {
 /// The buyer (`vevő`) of a document.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct BuyerInput {
@@ -182,6 +194,7 @@ pub struct BuyerInput {
     /// Partner identifier from the account's partner database (`azonosító`).
     #[serde(default)]
     pub id: Option<String>,
+}
 }
 
 impl BuyerInput {
@@ -229,8 +242,9 @@ impl From<BuyerInput> for Buyer {
     }
 }
 
+super::object::object_input! {
 /// Postal/delivery address of the buyer (`postázási cím`).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct PostalAddressInput {
@@ -244,6 +258,7 @@ pub struct PostalAddressInput {
     pub city: Option<String>,
     /// Street address.
     pub address: Option<String>,
+}
 }
 
 impl From<PostalAddressInput> for PostalAddress {
@@ -290,12 +305,13 @@ impl From<TaxpayerStatus> for szamlazz_agent::TaxpayerStatus {
     }
 }
 
+super::object::object_input! {
 /// One row of a document (`tétel`).
 ///
 /// Without `amounts`, computes net then VAT, rounded to the currency's minor
 /// unit, half away from zero. With `amounts`, preserves the asserted values
 /// after validating the net-first or gross-first convention. See `Amounts`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct LineItemInput {
@@ -326,6 +342,7 @@ pub struct LineItemInput {
     /// Free-text comment for the row (`megjegyzés`).
     #[serde(default)]
     pub comment: Option<String>,
+}
 }
 
 impl LineItemInput {

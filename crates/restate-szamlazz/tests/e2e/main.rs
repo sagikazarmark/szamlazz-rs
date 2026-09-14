@@ -86,6 +86,7 @@ mod agent_writes;
 mod arm_ack;
 mod cancellation;
 mod concurrency;
+mod contract_input;
 mod correct_invoice;
 mod create_final;
 mod create_invoice;

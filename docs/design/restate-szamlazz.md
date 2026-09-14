@@ -145,6 +145,9 @@ invocation_retry_policy(initial_interval = "2m", factor = 2.0, max_interval = "1
 inactivity_timeout = "4m"   abort_timeout = "3m"   journal_retention = "3d"   idempotency_retention = "30d"
 ```
 
+`storno_invoice` alone uses `inactivity_timeout = "6m"` with the same `abort_timeout = "3m"`:
+its retained reconciliation can perform five sequential reads plus bounded credential initialization.
+
 `get`: explicit `10s → 1m`, factor 2, `max_attempts = 3`, `kill`, `journal_retention = "1d"` (inspectable;
 completed reads replay within the invocation),
 and the reads' timeouts:
@@ -154,14 +157,16 @@ inactivity_timeout = "2m"   abort_timeout = "2m"
 ```
 
 One rule sizes every handler's timeouts (#114): a step's szamlazz.hu round trips at the Számla Agent client's
-`REQUEST_TIMEOUT` (60 s) each, plus the margin a stalling szamlazz.hu needs, `4m` / `3m` where the step is three trips
-(the create and storno steps' leading query, send and re-query), `2m` / `2m` where it is one: `set_credit_entries`' send
-(§4, `Szamlazz.Agent`) and every read step, so `get`, `Szamlazz.Agent.query`, `query_taxpayer` and `check_account`
-carry `2m` / `2m` too. Never the server's defaults (1 m / 1 m): a read step is one 60 s-bounded trip, and szamlazz.hu
+`REQUEST_TIMEOUT` (60 s) each, plus bounded initialization and operational margin. Order storno's candidate
+and original verification, followed by external-id lookup, order hint and fresh original verification,
+can take five trips in one reconciliation run; it uses `6m` / `3m`. Three-trip create and unmanaged
+storno paths retain `4m` / `3m`. Ordinary read handlers and `set_credit_entries`' single send
+(§4, `Szamlazz.Agent`) retain `2m` / `2m`, including `get`, `Szamlazz.Agent.query`, `query_taxpayer`
+and `check_account`. Never the server's defaults (1 m / 1 m): a read step is one 60 s-bounded trip, and szamlazz.hu
 has been observed to stall for a minute at a time and still answer, so a stalled read lands exactly on the default
 inactivity boundary, requesting suspension during the read. Abort occurs only if the SDK does not suspend
 within the subsequent abort interval. The
-discovery test pins all four.
+discovery test checks these values, including the Order storno exception and recovery handlers.
 
 Inactivity timeout waits for progress before requesting SDK suspension; abort timeout starts **after that
 request** and bounds the further wait before forced abort. They are execution controls, not simultaneous

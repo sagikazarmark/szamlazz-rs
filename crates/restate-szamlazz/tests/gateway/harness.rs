@@ -154,13 +154,15 @@ impl Harness {
             .expect("build");
         self.gateway
             .create_once(
-                CreateStepRequest {
+                CreateStepRequest::new(
                     external_id,
                     kind,
-                    order: &order,
-                    create: &create,
+                    &order,
+                    &create,
                     reversed,
-                },
+                    refs.corrected,
+                )
+                .expect("consistent create intent"),
                 CreatePermission::grant(),
             )
             .await
