@@ -149,6 +149,18 @@ pub enum OrdinaryExecutionContract {
         /// Provider id of the verified target, checked on every open execution.
         document_id: i64,
     },
+    /// Order reversal with a pinned verified original and fresh replay guards.
+    #[serde(rename = "request_response_storno_v1")]
+    RequestResponseStornoV1 {
+        /// Provider id of the original.
+        document_id: i64,
+        /// Original fulfillment date repeated by every send.
+        fulfillment_date: szamlazz_agent::Date,
+        /// Derived invoice form sent on reversal.
+        e_invoice: bool,
+        /// Original projected appearance code.
+        appearance: i64,
+    },
 }
 
 impl<'de> Deserialize<'de> for OrdinaryExecutionContract {
@@ -180,20 +192,32 @@ impl<'de> Deserialize<'de> for OrdinaryExecutionContract {
                 self,
                 mut map: M,
             ) -> Result<Self::Value, M::Error> {
-                if map.next_key::<String>()?.as_deref() != Some("request_response_delete_v1") {
-                    return Err(serde::de::Error::custom("unknown execution contract"));
-                }
-                let payload: DeleteExecution = map.next_value()?;
+                let result = match map.next_key::<String>()?.as_deref() {
+                    Some("request_response_delete_v1") => {
+                        let payload: DeleteExecution = map.next_value()?;
+                        OrdinaryExecutionContract::RequestResponseDeleteV1 {
+                            mode: payload.mode,
+                            force: payload.force,
+                            document_id: payload.document_id,
+                        }
+                    }
+                    Some("request_response_storno_v1") => {
+                        let payload: StornoExecution = map.next_value()?;
+                        OrdinaryExecutionContract::RequestResponseStornoV1 {
+                            document_id: payload.document_id,
+                            fulfillment_date: payload.fulfillment_date,
+                            e_invoice: payload.e_invoice,
+                            appearance: payload.appearance,
+                        }
+                    }
+                    _ => return Err(serde::de::Error::custom("unknown execution contract")),
+                };
                 if map.next_key::<String>()?.is_some() {
                     return Err(serde::de::Error::custom(
                         "execution contract requires one variant",
                     ));
                 }
-                Ok(OrdinaryExecutionContract::RequestResponseDeleteV1 {
-                    mode: payload.mode,
-                    force: payload.force,
-                    document_id: payload.document_id,
-                })
+                Ok(result)
             }
         }
         de.deserialize_any(Visitor)
@@ -204,6 +228,18 @@ super::object::object_input! {
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
 struct DeleteExecution { mode:super::DeleteMode, force:bool, document_id:i64 }
+}
+
+super::object::object_input! {
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StornoExecution {
+    document_id:i64,
+    #[serde(deserialize_with = "super::date::required")]
+    fulfillment_date:szamlazz_agent::Date,
+    e_invoice:bool,
+    appearance:i64
+}
 }
 
 fn exact_order_key<'de, D: Deserializer<'de>>(de: D) -> Result<OrderKey, D::Error> {

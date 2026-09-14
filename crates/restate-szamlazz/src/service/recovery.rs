@@ -30,6 +30,7 @@ const STATE: &str = "unresolved-write";
 enum ReplayWrite {
     Create,
     Delete,
+    Storno,
 }
 
 #[cfg(feature = "test-util")]
@@ -38,12 +39,14 @@ impl ReplayWrite {
         match self {
             Self::Create => "ordinary",
             Self::Delete => "proforma-delete",
+            Self::Storno => "order-storno",
         }
     }
     const fn write_name(self) -> &'static str {
         match self {
             Self::Create => "create-ordinary-request-response",
             Self::Delete => "delete-proforma-request-response",
+            Self::Storno => "storno-request-response",
         }
     }
 }
@@ -478,6 +481,12 @@ fn valid_execution_contract(marker: &UnresolvedWrite) -> bool {
         | (Some(Contract::RequestResponseDeleteV1 { .. }), WriteOperation::Delete { .. }) => {
             marker.proforma_number.is_none()
         }
+        (
+            Some(Contract::RequestResponseStornoV1 {
+                fulfillment_date, ..
+            }),
+            WriteOperation::Storno { .. },
+        ) => marker.proforma_number.is_none() && (1..=9999).contains(&fulfillment_date.year()),
         _ => false,
     }
 }
@@ -495,6 +504,54 @@ pub(super) async fn guard(ctx: &ObjectContext<'_>) -> Result<(), HandlerError> {
 }
 
 impl Execution {
+    #[cfg(feature = "test-util")]
+    pub(super) async fn request_response_storno(
+        &self,
+        ctx: &ObjectContext<'_>,
+        order: &OrderKey,
+        request: crate::gateway::StornoStepRequest<'_>,
+        original: &crate::gateway::FoundDocument,
+    ) -> Result<WriteResult, HandlerError> {
+        let contract =
+            crate::contract::recovery::OrdinaryExecutionContract::RequestResponseStornoV1 {
+                document_id: original.document_id,
+                fulfillment_date: request.fulfillment_date,
+                e_invoice: request.e_invoice,
+                appearance: original.appearance,
+            };
+        let marker = UnresolvedWrite {
+            execution_contract: Some(contract),
+            proforma_number: None,
+            prepayment_number: None,
+            version: MarkerVersion,
+            token: ctx.invocation_id().to_owned(),
+            owner_invocation: ctx.invocation_id().to_owned(),
+            created_at: String::new(),
+            scope: ctx.scope().map(str::to_owned),
+            order: order.clone(),
+            namespace: self.config.namespace.clone(),
+            external_id: request.external_id.as_str().to_owned(),
+            account_id: self.account.id.to_string(),
+            endpoint: self.account.endpoint.as_str().to_owned(),
+            credential_ref: self.account.credential_ref.to_string(),
+            operation: WriteOperation::Storno {
+                number: request.invoice_number.to_owned(),
+            },
+        };
+        self.request_response_write(
+            ctx,
+            order,
+            request.external_id,
+            marker,
+            ReplayWrite::Storno,
+            move |gateway, marker| async move {
+                gateway
+                    .request_response_storno(request, &marker, original)
+                    .await
+            },
+        )
+        .await
+    }
     /// Separate admission/run identity for the isolated ordinary experiment.
     /// Every non-positive result after the barrier retains earlier uncertainty.
     #[cfg(feature = "test-util")]
@@ -662,7 +719,8 @@ impl Execution {
                 order,
                 match marker.operation {
                     WriteOperation::Create { kind, .. } => Some(kind),
-                    _ => Some(crate::identity::IssuedKind::Proforma),
+                    WriteOperation::Delete { .. } => Some(crate::identity::IssuedKind::Proforma),
+                    WriteOperation::Storno { .. } => None,
                 },
                 external_id,
             )

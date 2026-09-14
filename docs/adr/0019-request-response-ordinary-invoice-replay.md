@@ -229,6 +229,28 @@ markers remain readable; older deployments reject these extensions. Existing
 ordinary/proforma step sequences are unchanged. Production rollout/migration and
 other mutation types remain outside this extension.
 
+### Storno extension (agreed)
+
+The user approved Order storno through the shared RequestResponse write boundary
+and enabling existing unmanaged Agent storno. The Order's open run first seeks a
+known reversal, then verifies the pinned original provider id, Order, stornoable
+type, fulfillment date and appearance before any replay send. The same original
+must still be live. Existing numbered reversal acknowledgement rules and verified
+reversal evidence settle; later refusals, changed guards and inconclusive answers
+retain uncertainty. Same-number echoes and unnumbered acknowledgements do not
+establish reversal. Recorded uncertainty stays read-only; kill/cancellation retain
+markers. Candidate-associated notification warnings keep their existing rules.
+
+The `request_response_storno_v1` marker records provider id, fulfillment date,
+derived e_invoice and reported appearance, beside the original number. Caller
+comment and explicit recipient remain the same invocation input, not additional
+marker data. Both automatic/operator document recovery check the retained original
+identity. Evidence does not prove notification delivery or exclude delayed old
+execution. This accepts observed repeat-storno behavior rather than a universal
+exactly-once guarantee. Agent storno retains its existing query-first issue policy,
+no-Order guard, acknowledgement/no-op behavior and lack of an Order marker.
+Credits and corrective issuance remain outside the experimental subset.
+
 ### Host and transport behavior
 
 The [workers-rs example](../../examples/workers/README.md) now builds and runs the

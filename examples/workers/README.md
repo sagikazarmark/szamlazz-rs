@@ -1,7 +1,8 @@
 # Actual Order/Agent on Cloudflare Workers (#247)
 
 An **experimental**, explicitly selected endpoint for proforma creation/deletion and ordinary/prepayment/final invoices (including
-exact-target reissue and pinned proforma conversion), reads and operator recovery.
+exact-target reissue and pinned proforma conversion), Order/unmanaged Agent storno,
+reads and operator recovery.
 It embeds the real services, including input/money validation, account
 resolution, fresh guards, unresolved markers and read-only reconciliation.
 It does not approve additional mutation types or production migration. The ingress
@@ -136,6 +137,8 @@ unsigned discovery refusal. The Rust test uses real Restate ingress to exercise:
 - Prepayment conversion and final issuance with caller-supplied deduction lines;
   interrupted final issuance with a reversed prepayment remains read-only until
   the final document becomes visible. The exact prepayment reference is retained.
+- Order storno open-run resubmission and recorded uncertainty with read-only
+  reconciliation, plus the existing unmanaged Agent storno path.
 
 The native buffered suite additionally covers invisible first effects with/without
 fake deduplication and deliberately surviving old execution. Those remain accepted

@@ -178,6 +178,18 @@ fn entries() -> Vec<Entry> {
         },
     };
     all.extend(entries_of(vec![()], &single()));
+    let mut storno = marker.clone();
+    storno.execution_contract = Some(
+        crate::contract::recovery::OrdinaryExecutionContract::RequestResponseStornoV1 {
+            document_id: 123,
+            fulfillment_date: jiff::civil::date(2026, 9, 3),
+            e_invoice: false,
+            appearance: 1,
+        },
+    );
+    storno.operation = WriteOperation::Storno {
+        number: "SZ-1".into(),
+    };
     let mut prepayment = marker.clone();
     prepayment.execution_contract =
         Some(crate::contract::recovery::OrdinaryExecutionContract::RequestResponsePrepaymentV1);
@@ -218,6 +230,7 @@ fn entries() -> Vec<Entry> {
     all.extend(entries_of(
         vec![
             super::recovery::OrdinaryIntent::new(marker.clone()),
+            super::recovery::OrdinaryIntent::new(storno.clone()),
             super::recovery::OrdinaryIntent::new(prepayment.clone()),
             super::recovery::OrdinaryIntent::new(final_invoice.clone()),
             super::recovery::OrdinaryIntent::new(proforma.clone()),
@@ -226,7 +239,14 @@ fn entries() -> Vec<Entry> {
         &single(),
     ));
     all.extend(entries_of(
-        vec![marker, proforma, deletion, prepayment, final_invoice],
+        vec![
+            marker,
+            proforma,
+            deletion,
+            prepayment,
+            final_invoice,
+            storno,
+        ],
         &single(),
     ));
     all.extend(entries_of(

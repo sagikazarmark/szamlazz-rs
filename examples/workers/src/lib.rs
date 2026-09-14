@@ -82,6 +82,7 @@ async fn serve(
                 .handler("create_proforma", policy.clone())
                 .handler("create_prepayment", policy.clone())
                 .handler("create_final", policy.clone())
+                .handler("storno_invoice", policy.clone())
                 .handler("delete_proforma", policy),
         )
     };

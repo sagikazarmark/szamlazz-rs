@@ -1,5 +1,10 @@
 # Actual Order RequestResponse experiment (#247)
 
+Storno coverage includes shared Order/Agent normal execution, visible reversal
+recovery, unfinished-run resubmission, changed original date/appearance/id/Order,
+later refusal, recorded uncertainty, same-number and unnumbered acknowledgements,
+retained notification warning and operator recovery against the pinned original.
+
 The prepayment/final extension tests pinned proforma/prepayment references, explicit
 final deduction lines, missing/reversed/replaced prerequisites after interruption,
 positive target evidence despite changed prerequisites, recorded uncertainty,

@@ -6,6 +6,7 @@ mod chain;
 mod common;
 mod extensions;
 mod proformas;
+mod storno;
 
 use axum::{Router, body::Body, extract::State};
 use http_body_util::{BodyExt as _, Full};
@@ -208,6 +209,7 @@ fn endpoint(provider: &str, lab: Arc<Lab>, worker: usize) -> Endpoint {
                         .handler("create_proforma", policy.clone())
                         .handler("create_prepayment", policy.clone())
                         .handler("create_final", policy.clone())
+                        .handler("storno_invoice", policy.clone())
                         .handler("delete_proforma", policy),
                 ),
         )
@@ -346,7 +348,7 @@ async fn pause(server: &Restate, id: &str) {
 
 async fn admission_cases(server: &Restate, mock: &wiremock::MockServer, lab: &Arc<Lab>) {
     let before = mock.received_requests().await.expect("requests").len();
-    for handler in ["correct_invoice", "storno_invoice"] {
+    for handler in ["correct_invoice"] {
         let response = server
             .invoke(
                 &Call::object("Szamlazz.Order", "unsupported", handler),
@@ -363,7 +365,7 @@ async fn admission_cases(server: &Restate, mock: &wiremock::MockServer, lab: &Ar
             "must refuse at capability boundary: {handler}"
         );
     }
-    for handler in ["storno", "set_credit_entries"] {
+    for handler in ["set_credit_entries"] {
         let response = server
             .invoke(
                 &Call::service("Szamlazz.Agent", handler),
@@ -753,6 +755,11 @@ async fn e2e_request_response_actual_order() {
     extensions::reissue(&server, &mock).await;
     proformas::create(&server, &mock).await;
     chain::issue(&server, &mock).await;
+    storno::normal(&server, &mock).await;
+    storno::unmanaged(&server, &mock).await;
+    storno::interrupted(&server, &mock, &lab).await;
+    storno::recovery(&server, &mock).await;
+    storno::cancellation(&server, &mock).await;
     chain::final_invoice(&server, &mock).await;
     chain::interrupted(&server, &mock, &lab).await;
     chain::reissue_and_recover(&server, &mock).await;

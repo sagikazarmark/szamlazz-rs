@@ -243,8 +243,6 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<StornoRequest>,
     ) -> HandlerResult<Json<StornoResponse>> {
-        #[cfg(feature = "test-util")]
-        self.require_supported_mutation()?;
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
         super::recovery::guard(&ctx).await?;
@@ -550,8 +548,6 @@ impl Agent {
         ctx: Context<'_>,
         request: Body<StornoRequest>,
     ) -> HandlerResult<Json<StornoResponse>> {
-        #[cfg(feature = "test-util")]
-        self.require_supported_mutation()?;
         let request = request.into_request()?;
         let ctx = &ctx;
         self.execute(ctx, |execution| async move {

@@ -6,7 +6,7 @@ impl Order {
     /// Enable the isolated `RequestResponse` ordinary-issuance experiment (#247).
     /// Requires enabled provider per-type duplicate-order checking. Proformas,
     /// ordinary/prepayment/final invoices, including exact-target reissue and pinned references, reads and
-    /// evidence-carrying recovery and exact-target proforma deletion are supported. Other mutations are refused
+    /// evidence-carrying recovery, Order storno and exact-target proforma deletion are supported. Other mutations are refused
     /// before provider I/O. Matching issuance does not prove uniqueness
     /// or exclude a delayed old execution. Not a production deployment option.
     #[must_use]
@@ -21,7 +21,8 @@ impl Order {
 }
 
 impl Agent {
-    /// Restrict this Agent to reads for the isolated #247 `RequestResponse` endpoint.
+    /// Enable reads and existing unmanaged storno for the isolated #247
+    /// `RequestResponse` endpoint. Credit-entry writes remain refused.
     /// Enable alongside [`Order::experimental_request_response`].
     #[must_use]
     pub fn experimental_request_response(mut self) -> Self {

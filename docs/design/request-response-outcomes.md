@@ -40,6 +40,30 @@ below.
 
 ## Admission and support
 
+### Storno extension (agreed)
+
+Order storno uses the same portable retained-write boundary. Unfinished replay
+first seeks an existing reversal, requiring both a matching storno and the freshly
+queried reversed original. Only the same live original (number, provider id,
+Order, stornoable type, fulfillment date and appearance) permits another send.
+The original's verified fulfillment date and derived e-invoice flag stay pinned,
+as do the caller's comment/notification recipient in the invocation input. A changed
+guard, missing original, later refusal, credentials failure or inconclusive answer
+after admission retains uncertainty. An original-number echo or unnumbered success
+does not establish reversal. Recorded uncertainty stays read-only through resume;
+kill/cancellation retain state. Known reversal evidence or a numbered reversal
+acknowledgement settles after recording, without proving notification delivery or
+excluding delayed old execution. Candidate-associated notification warnings retain
+their existing evidence rules. Operator recovery preserves exact marker echoes and
+the pinned original identity. This relies on observed repeat-storno behavior, not
+an exactly-once guarantee.
+
+Agent storno is enabled with its existing unmanaged query-first issue policy and
+no-Order guard, unchanged. It has no Order marker; its documented uncertainty and
+no-op acknowledgement policy remain distinct. Native and Workers run these same
+services with explicit experimental opt-in. Credits and corrective issuance remain
+outside the approved mutation subset.
+
 ### Prepayment/final extension (agreed)
 
 The same experimental handlers now permit prepayment and final issuance, including
@@ -101,7 +125,8 @@ outside this extension.
 
 The explicit `test-util` opt-in on **both** Order and Agent is for an isolated
 experimental endpoint. It permits all four create handlers (proforma, ordinary,
-prepayment, final), exact-target `delete_proforma`, including supported reissue
+prepayment, final), exact-target `delete_proforma`, Order `storno_invoice` and unmanaged
+Agent `storno`, including supported reissue
 and pinned conversion, evidence-carrying `recover`, and reads (`get`,
 `observe_unresolved`, Agent `query`, `query_taxpayer`, `check_account`). All other
 mutations return the existing `invalid_input` fault before provider I/O.

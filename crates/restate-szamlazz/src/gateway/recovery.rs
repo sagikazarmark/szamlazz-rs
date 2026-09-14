@@ -190,6 +190,107 @@ impl WriteResult {
 }
 
 impl Gateway {
+    /// Experimental Order storno: settle existing evidence before inspecting
+    /// fresh send guards; only the pinned live original can authorize replay.
+    #[cfg(feature = "test-util")]
+    pub(crate) async fn request_response_storno(
+        &self,
+        request: super::StornoStepRequest<'_>,
+        marker: &UnresolvedWrite,
+        pinned: &FoundDocument,
+    ) -> WriteResult {
+        use crate::contract::recovery::OrdinaryExecutionContract as Contract;
+        let expected = Contract::RequestResponseStornoV1 {
+            document_id: pinned.document_id,
+            fulfillment_date: request.fulfillment_date,
+            e_invoice: request.e_invoice,
+            appearance: pinned.appearance,
+        };
+        if marker.execution_contract != Some(expected)
+            || marker.operation
+                != (WriteOperation::Storno {
+                    number: request.invoice_number.to_owned(),
+                })
+            || marker.external_id != request.external_id.as_str()
+        {
+            return WriteResult::unresolved("storno request differs from retained original intent");
+        }
+        match self
+            .lookup_order_storno_checked(request.external_id, &marker.order, request.invoice_number)
+            .await
+        {
+            Ok(StornoLookupOutcome::AlreadyReversed { .. }) => {
+                return self.reconcile_write(marker, None).await;
+            }
+            Ok(StornoLookupOutcome::Absent) => {}
+            Err(QueryError::CredentialsRejected(answer))
+            | Ok(StornoLookupOutcome::CredentialsRejected(answer)) => {
+                answer.warn_credentials_rejected(request.external_id.namespace());
+                return WriteResult::unresolved(format!(
+                    "storno lookup credentials rejected: {}",
+                    answer.code
+                ));
+            }
+            Err(QueryError::Api(answer) | QueryError::Transient(answer))
+            | Ok(StornoLookupOutcome::Api(answer)) => {
+                return WriteResult::unresolved(format!(
+                    "storno lookup vendor code {}",
+                    answer.code
+                ));
+            }
+            Err(cause) => {
+                return WriteResult::unresolved(format!("storno lookup inconclusive: {cause}"));
+            }
+        }
+        let fresh = match self.verify(request.invoice_number).await {
+            Ok(QueryOutcome::Found(found)) => found,
+            Ok(QueryOutcome::CredentialsRejected(answer)) => {
+                answer.warn_credentials_rejected(request.external_id.namespace());
+                return WriteResult::unresolved(format!(
+                    "original credentials rejected: {}",
+                    answer.code
+                ));
+            }
+            Ok(QueryOutcome::Api(answer)) => {
+                return WriteResult::unresolved(format!(
+                    "original query vendor code {}",
+                    answer.code
+                ));
+            }
+            Ok(QueryOutcome::NotFound) => {
+                return WriteResult::unresolved("original absent; reversal not established");
+            }
+            Err(cause) => {
+                return WriteResult::unresolved(format!("original query unanswered: {cause}"));
+            }
+        };
+        if fresh.document_id != pinned.document_id
+            || !fresh.carries_order(&marker.order)
+            || !fresh.is_stornoable()
+            || fresh.fulfillment_date != Some(request.fulfillment_date)
+            || fresh.appearance != pinned.appearance
+        {
+            return WriteResult::unresolved("fresh original differs from pinned storno intent");
+        }
+        if !fresh.is_live() {
+            return self.reconcile_write(marker, None).await;
+        }
+        match self.storno_send(request, Some(marker)).await {
+            Ok(outcome @ (StornoOutcome::Reversed(_) | StornoOutcome::AlreadyReversed { .. })) => {
+                WriteResult::Storno(outcome)
+            }
+            Ok(StornoOutcome::CredentialsRejected(answer)) => {
+                answer.warn_credentials_rejected(request.external_id.namespace());
+                WriteResult::unresolved(format!("storno credentials rejected: {}", answer.code))
+            }
+            Ok(StornoOutcome::Rejected(rejection)) => WriteResult::unresolved(format!(
+                "storno refused: {}; earlier execution remains unresolved",
+                rejection.code
+            )),
+            Ok(_) => WriteResult::unresolved("storno answer did not establish reversal"),
+            Err(cause) => WriteResult::Unresolved(WriteDiagnostic::unconfirmed(cause)),
+        }
+    }
     /// #247 only: open-run replay may submit again after fresh absence and
     /// guards. Kept distinct from the public consumed-permission contract.
     #[cfg(feature = "test-util")]
@@ -629,10 +730,21 @@ impl Gateway {
                 ReconciliationOutcome::Reversed {
                     storno_number,
                     storno_document_id,
-                } => WriteResult::Storno(StornoOutcome::AlreadyReversed {
-                    storno_number,
-                    storno_document_id,
-                }),
+                } => {
+                    if let Some(crate::contract::recovery::OrdinaryExecutionContract::RequestResponseStornoV1 {document_id,fulfillment_date,appearance,..})=marker.execution_contract
+                        && let WriteOperation::Storno {number}=&marker.operation {
+                        match self.verify(number).await? {
+                            QueryOutcome::Found(original) if original.document_id==document_id && original.fulfillment_date==Some(fulfillment_date) && original.appearance==appearance && original.carries_order(&marker.order) && original.is_stornoable() && original.reversed==Some(true)=>{},
+                            QueryOutcome::CredentialsRejected(answer)=>return Ok(WriteResult::Answered {credentials:true,answer}),
+                            QueryOutcome::Api(answer)=>return Ok(WriteResult::Answered {credentials:false,answer}),
+                            _=>return Ok(WriteResult::unresolved("reversal evidence does not match pinned original")),
+                        }
+                    }
+                    WriteResult::Storno(StornoOutcome::AlreadyReversed {
+                        storno_number,
+                        storno_document_id,
+                    })
+                }
                 ReconciliationOutcome::Inconclusive { reason } => WriteResult::unresolved(reason),
                 ReconciliationOutcome::CredentialsRejected(answer) => WriteResult::Answered {
                     credentials: true,

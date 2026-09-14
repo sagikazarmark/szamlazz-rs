@@ -432,7 +432,7 @@ async fn e2e_workers_signed_scoped_ordinary() {
         "unresolved"
     );
     let before = mock.received_requests().await.expect("requests").len();
-    for handler in ["correct_invoice", "storno_invoice"] {
+    for handler in ["correct_invoice"] {
         let response = server
             .invoke(
                 &Call::object("Szamlazz.Order", "BLOCKED", handler).scoped("alpha"),
@@ -449,7 +449,7 @@ async fn e2e_workers_signed_scoped_ordinary() {
             "{handler}: {response:?}"
         );
     }
-    for handler in ["storno", "set_credit_entries"] {
+    for handler in ["set_credit_entries"] {
         let response = server
             .invoke(
                 &Call::service("Szamlazz.Agent", handler).scoped("alpha"),
@@ -663,8 +663,136 @@ async fn e2e_workers_signed_scoped_ordinary() {
     proforma_lifecycle(&server, &mock, uri).await;
     chain_lifecycle(&server, &mock, uri).await;
     chain_resubmission(&server, &mock, uri).await;
+    storno_lifecycle(&server, &mock, uri).await;
     server.finish().await;
     host.finish();
+}
+
+async fn storno_lifecycle(
+    server: &restate_e2e_harness::Restate,
+    mock: &wiremock::MockServer,
+    uri: &str,
+) {
+    common::number_query("UNMANAGED-STORNO")
+        .respond_with(common::Doc::unmanaged("UNMANAGED-STORNO", "SZ").response())
+        .with_priority(1)
+        .mount(mock)
+        .await;
+    common::storno_of_number_repeating_telj("UNMANAGED-STORNO")
+        .respond_with(common::created("SS-UNMANAGED", "-1000", "-1270"))
+        .expect(1)
+        .mount(mock)
+        .await;
+    let response = server
+        .invoke(
+            &Call::service("Szamlazz.Agent", "storno").scoped("alpha"),
+            Some(&json!({"invoice_number":"UNMANAGED-STORNO"})),
+            None,
+        )
+        .await;
+    assert_eq!(response.body["outcome"], "reversed", "{response:?}");
+    for (key, recorded) in [("STORNO-REPLAY", false), ("STORNO-RECORDED", true)] {
+        let original = format!("ORIGINAL-{key}");
+        let reversal = format!("SS-{key}");
+        let sends = Arc::new(AtomicUsize::new(0));
+        let visible = Arc::new(AtomicBool::new(false));
+        let shown = visible.clone();
+        let number = original.clone();
+        common::number_query(&original)
+            .respond_with(move |_: &wiremock::Request| {
+                let mut doc = common::Doc::of(&number, "SZ", key);
+                doc.reversed = shown.load(Ordering::SeqCst);
+                doc.response()
+            })
+            .with_priority(1)
+            .mount(mock)
+            .await;
+        let shown = visible.clone();
+        let number = original.clone();
+        let ss = reversal.clone();
+        common::external_id_query(&format!("workers:{key}:storno:{original}"))
+            .respond_with(move |_: &wiremock::Request| {
+                if shown.load(Ordering::SeqCst) {
+                    let mut doc = common::Doc::of(&ss, "SS", key);
+                    doc.referenced_invoice = Some(&number);
+                    doc.response()
+                } else {
+                    common::not_found()
+                }
+            })
+            .with_priority(1)
+            .mount(mock)
+            .await;
+        let count = sends.clone();
+        let ss = reversal.clone();
+        common::storno_of_number_repeating_telj(&original)
+            .respond_with(move |req: &wiremock::Request| {
+                assert!(String::from_utf8_lossy(&req.body).contains("notify@example.test"));
+                let n = count.fetch_add(1, Ordering::SeqCst);
+                if recorded {
+                    wiremock::ResponseTemplate::new(500)
+                } else if n == 0 {
+                    common::created(&ss, "-1000", "-1270").set_delay(Duration::from_secs(20))
+                } else {
+                    common::created(&ss, "-1000", "-1270")
+                }
+            })
+            .mount(mock)
+            .await;
+        let body = json!({"invoice_number":original,"buyer_email":"notify@example.test"});
+        let call = Call::object("Szamlazz.Order", key, "storno_invoice").scoped("alpha");
+        let started = server.invoke(&call.send(), Some(&body), Some(key)).await;
+        if recorded {
+            server
+                .admin()
+                .await_status(started.invocation_id(), &["paused"])
+                .await;
+            let observed = server
+                .invoke(
+                    &Call::object("Szamlazz.Order", key, "observe_unresolved").scoped("alpha"),
+                    None,
+                    None,
+                )
+                .await;
+            assert_eq!(observed.body["state"], "unresolved");
+            assert!(
+                observed.body["marker"]["execution_contract"]["request_response_storno_v1"]
+                    .is_object()
+            );
+            server.admin().resume(started.invocation_id()).await;
+            server
+                .admin()
+                .await_status(started.invocation_id(), &["paused"])
+                .await;
+            assert_eq!(sends.load(Ordering::SeqCst), 1);
+            visible.store(true, Ordering::SeqCst);
+            server.admin().resume(started.invocation_id()).await;
+        } else {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while sends.load(Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("storno send");
+            common::http_client()
+                .post(format!("{uri}/__interrupt"))
+                .send()
+                .await
+                .expect("interrupt")
+                .error_for_status()
+                .expect("interrupted");
+        }
+        server
+            .admin()
+            .await_status(started.invocation_id(), &["completed"])
+            .await;
+        let response = server.invoke(&call, Some(&body), Some(key)).await;
+        assert_eq!(response.body["outcome"], "reversed", "{response:?}");
+        assert_eq!(response.body["storno_number"], reversal);
+        assert_eq!(sends.load(Ordering::SeqCst), if recorded { 1 } else { 2 });
+    }
+    mock.verify().await;
 }
 
 async fn chain_resubmission(

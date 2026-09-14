@@ -28,15 +28,20 @@ are computed or validated against caller assertions, domain outcomes are returne
 An isolated **#247 RequestResponse experiment** is available behind `test-util`,
 explicitly selected on both services with `.experimental_request_response()`.
 It supports proforma creation and exact-target deletion, ordinary/prepayment/final
-invoices including exact-target reissue and pinned references, reads and
-evidence-carrying recovery; it requires operator-confirmed
+invoices including exact-target reissue and pinned references, reads,
+Order storno and evidence-carrying recovery; Agent also permits its existing
+unmanaged storno handler. It requires operator-confirmed
 provider duplicate-order checking, and accepts unfinished-run resubmission risk.
 Proforma deletion clears automatically only on an acknowledged deletion; a later
 absence/refusal or failed guard retains uncertainty. Named deletion keeps its exact
 target; namespace-owned deletion also refreshes the slot. Recovery requires audited
 deletion or non-execution evidence, never absence alone.
-Recorded uncertainty stays read-only; other mutations are refused. See the
-[actual-service experiment](tests/request_response/README.md) and
+Recorded uncertainty stays read-only; other mutations are refused.
+RequestResponse Order storno retains the verified original's provider id, fulfillment
+date and appearance. An interrupted open run refreshes that original before any
+resubmission; recorded uncertainty only reconciles. Agent storno keeps its distinct
+unmanaged query-first issue policy and no-Order guard.
+See the [actual-service experiment](tests/request_response/README.md) and
 [outcome/clearance table](../../docs/design/request-response-outcomes.md).
 The [workers-rs example](../../examples/workers/README.md) now exercises this slice
 in workerd with signed/scoped Restate calls. It documents the interim SDK patch,

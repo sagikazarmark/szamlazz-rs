@@ -44,7 +44,7 @@ const server = createServer(async (req,res) => {
     const execution=workers[index].dispatchFetch(`http://localhost${req.url}`,{method:req.method,headers:req.headers,...(body.length ? {body} : {})});
     let cut;
     const interrupted=new Promise(resolve=>{cut=resolve;});
-    if(["create_invoice","create_proforma","create_prepayment","create_final","delete_proforma"].some(handler=>req.url.includes(`/invoke/Szamlazz.Order/${handler}`))) interrupt=cut;
+    if(["create_invoice","create_proforma","create_prepayment","create_final","delete_proforma","storno_invoice"].some(handler=>req.url.includes(`/invoke/Szamlazz.Order/${handler}`))) interrupt=cut;
     const response=await Promise.race([execution,interrupted]);
     if(interrupt===cut) interrupt=undefined;
     if(!response) {
