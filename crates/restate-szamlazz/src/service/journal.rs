@@ -227,15 +227,21 @@ fn entries() -> Vec<Entry> {
     deletion.operation = WriteOperation::Delete {
         number: "D-1".into(),
     };
+    let mut invoice = marker.clone();
+    invoice.execution_contract =
+        Some(crate::contract::recovery::ReplayExecutionContract::RequestResponseOrdinaryV1);
     all.extend(entries_of(
         vec![
-            super::recovery::ReplayIntent::new(marker.clone()),
-            super::recovery::ReplayIntent::new(storno.clone()),
-            super::recovery::ReplayIntent::new(prepayment.clone()),
-            super::recovery::ReplayIntent::new(final_invoice.clone()),
-            super::recovery::ReplayIntent::new(proforma.clone()),
-            super::recovery::ReplayIntent::new(deletion.clone()),
-        ],
+            invoice,
+            storno.clone(),
+            prepayment.clone(),
+            final_invoice.clone(),
+            proforma.clone(),
+            deletion.clone(),
+        ]
+        .into_iter()
+        .map(|marker| super::recovery::ReplayIntent::new(marker).expect("valid replay contract"))
+        .collect(),
         &single(),
     ));
     all.extend(entries_of(
@@ -758,6 +764,64 @@ async fn no_journal_entry_carries_the_agent_key() {
             entry.label,
             entry.json
         );
+    }
+}
+
+/// New execution and replay must agree about which retained intent is admissible.
+#[test]
+fn replay_intents_require_explicit_matching_contracts() {
+    use super::recovery::ReplayIntent;
+    use crate::contract::recovery::UnresolvedWrite;
+
+    for entry in entries()
+        .into_iter()
+        .filter(|entry| entry.type_name == std::any::type_name::<ReplayIntent>())
+    {
+        let value: Value = serde_json::from_str(&entry.json).expect("sample JSON");
+        for change in ["missing", "null", "corrective", "mismatched", "unknown"] {
+            let mut changed = value.clone();
+            match change {
+                "missing" => {
+                    changed
+                        .as_object_mut()
+                        .expect("marker")
+                        .remove("execution_contract");
+                }
+                "null" => changed["execution_contract"] = Value::Null,
+                "corrective" => {
+                    changed["operation"] = serde_json::json!({
+                        "type": "create", "kind": "corrective",
+                        "expected_number": null, "corrected_number": "SZ-BASE"
+                    });
+                }
+                "mismatched" => {
+                    // A supported operation still cannot inherit another operation's contract.
+                    changed["operation"] = if value["operation"]["type"] == "create"
+                        && value["operation"]["kind"] == "prepayment"
+                    {
+                        serde_json::json!({"type":"create", "kind":"invoice",
+                            "expected_number":null, "corrected_number":null})
+                    } else if value["operation"]["type"] == "storno" {
+                        serde_json::json!({"type":"delete", "number":"D-1"})
+                    } else {
+                        serde_json::json!({"type":"create", "kind":"prepayment",
+                            "expected_number":null, "corrected_number":null})
+                    };
+                }
+                "unknown" => changed["execution_contract"] = "future_execution_v2".into(),
+                _ => unreachable!(),
+            }
+            assert!(
+                serde_json::from_value::<ReplayIntent>(changed.clone()).is_err(),
+                "{change} must not authorize replay: {changed}"
+            );
+            if let Ok(marker) = serde_json::from_value::<UnresolvedWrite>(changed.clone()) {
+                assert!(
+                    ReplayIntent::new(marker).is_err(),
+                    "{change} must not authorize new execution: {changed}"
+                );
+            }
+        }
     }
 }
 

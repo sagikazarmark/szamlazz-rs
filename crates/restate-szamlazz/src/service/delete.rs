@@ -69,7 +69,7 @@ impl Execution {
         };
         if self.config.order_execution.permits_replay() {
             let result = self
-                .request_response_delete(ctx, &order, &proforma_id, found, request)
+                .delete_replay_enabled(ctx, &order, &proforma_id, found, request)
                 .await?;
             let crate::gateway::recovery::WriteResult::Delete(outcome) = result else {
                 return Err(Fault::outcome_unknown("unexpected recovery operation").into());

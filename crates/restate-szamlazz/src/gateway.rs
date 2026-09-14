@@ -422,6 +422,27 @@ pub enum CreateStepRequestError {
 }
 
 impl<'a> CreateStepRequest<'a> {
+    pub(crate) fn external_id(&self) -> &'a ExternalId {
+        self.external_id
+    }
+
+    pub(crate) fn order(&self) -> &'a OrderKey {
+        self.order
+    }
+
+    pub(crate) fn replay_contract(
+        &self,
+    ) -> Option<crate::contract::recovery::ReplayExecutionContract> {
+        use crate::contract::recovery::ReplayExecutionContract as Contract;
+        match self.kind {
+            IssuedKind::Invoice => Some(Contract::RequestResponseOrdinaryV1),
+            IssuedKind::Proforma => Some(Contract::RequestResponseProformaV1),
+            IssuedKind::Prepayment => Some(Contract::RequestResponsePrepaymentV1),
+            IssuedKind::Final => Some(Contract::RequestResponseFinalV1),
+            IssuedKind::Corrective => None,
+        }
+    }
+
     pub(crate) fn prepayment_number(&self) -> Option<&str> {
         match &self.create.kind {
             szamlazz_agent::ops::invoice::InvoiceKind::Final {
@@ -521,6 +542,18 @@ impl<'a> CreateStepRequest<'a> {
 #[must_use]
 pub struct CreatePermission {
     _private: (),
+}
+
+/// Where an uncertain create is reconciled and which duplicate evidence survives
+/// the send. These policies describe settlement, not permission to submit.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CreateSettlement {
+    /// Direct Gateway callers receive an immediate intent-aware reconciliation.
+    Immediate,
+    /// Protected Order records uncertainty before its read-only reconciliation.
+    Retained,
+    /// Replay-enabled Order also preserves positive evidence from a duplicate reply.
+    RetainedWithDuplicateEvidence,
 }
 
 impl CreatePermission {
@@ -1519,33 +1552,23 @@ impl Gateway {
             Err(QueryError::Transport(message)) => return Err(Unconfirmed::Transport(message)),
         }
 
-        self.create_send(request, false).await
+        self.create_send(request, CreateSettlement::Immediate).await
     }
 
     async fn create_send(
         &self,
         request: &CreateStepRequest<'_>,
-        protected: bool,
-    ) -> Result<CreateOutcome, Unconfirmed> {
-        self.create_send_with_duplicate_evidence(request, protected, false)
-            .await
-    }
-
-    async fn create_send_with_duplicate_evidence(
-        &self,
-        request: &CreateStepRequest<'_>,
-        protected: bool,
-        retain_positive_duplicate: bool,
+        settlement: CreateSettlement,
     ) -> Result<CreateOutcome, Unconfirmed> {
         // Step 2: create.
         match self.send(request.create).await {
             Ok(CreationOutcome::Issued(created)) => {
                 if request.reversed == Some(created.invoice_number.as_str()) {
                     let open = Unconfirmed::ReissueEcho;
-                    return if protected {
-                        Err(open)
-                    } else {
+                    return if settlement == CreateSettlement::Immediate {
                         self.settle_or(request, open).await
+                    } else {
+                        Err(open)
                     };
                 }
                 let issued = IssuedDocument::from(created);
@@ -1560,10 +1583,10 @@ impl Gateway {
                     code: None,
                     message: "the create succeeded without a document number".to_owned(),
                 };
-                if protected {
-                    Err(open)
-                } else {
+                if settlement == CreateSettlement::Immediate {
                     self.settle_or(request, open).await
+                } else {
+                    Err(open)
                 }
             }
             Err(error) => match classify_failure("create", error) {
@@ -1580,14 +1603,14 @@ impl Gateway {
                         code: Some(answer.code),
                         message: answer.message,
                     };
-                    if protected {
-                        Err(open)
-                    } else {
+                    if settlement == CreateSettlement::Immediate {
                         self.settle_or(request, open).await
+                    } else {
+                        Err(open)
                     }
                 }
                 Failure::Unavailable(message) => {
-                    if protected {
+                    if settlement != CreateSettlement::Immediate {
                         return Err(Unconfirmed::Unavailable(message));
                     }
                     tracing::warn!("szlahu_down on the create; re-querying");
@@ -1595,7 +1618,7 @@ impl Gateway {
                         .await
                 }
                 Failure::Transport(message) => {
-                    if protected {
+                    if settlement != CreateSettlement::Immediate {
                         return Err(Unconfirmed::Transport(message));
                     }
                     tracing::warn!("transport failure; re-querying");
@@ -1607,12 +1630,12 @@ impl Gateway {
                     let diagnostic = self.after_duplicate(request, answer.clone()).await;
                     Ok(match diagnostic {
                         outcome @ (CreateOutcome::Reconciled(_) | CreateOutcome::Reversed(_))
-                            if retain_positive_duplicate =>
+                            if settlement == CreateSettlement::RetainedWithDuplicateEvidence =>
                         {
                             outcome
                         }
                         outcome @ CreateOutcome::DuplicateOrderNumber { .. } => outcome,
-                        outcome if !protected => outcome,
+                        outcome if settlement == CreateSettlement::Immediate => outcome,
                         _ => duplicate_refusal(request.kind, answer),
                     })
                 }

@@ -190,9 +190,104 @@ impl WriteResult {
 }
 
 impl Gateway {
-    /// Experimental Order storno: settle existing evidence before inspecting
+    /// Replay-enabled deletion refreshes the pinned target before resubmission.
+    /// Only acknowledged deletion settles; an absent target is still uncertainty.
+    pub(crate) async fn delete_replay_enabled(
+        &self,
+        external_id: &ExternalId,
+        marker: &UnresolvedWrite,
+        found: &FoundDocument,
+        request: &crate::contract::DeleteProformaRequest,
+    ) -> WriteResult {
+        use super::OwnershipOutcome;
+        use crate::contract::DeleteMode;
+        use crate::contract::recovery::ReplayExecutionContract as Contract;
+
+        let contract = Contract::for_delete(request, found.document_id);
+        if marker.execution_contract != Some(contract)
+            || marker.operation
+                != (WriteOperation::Delete {
+                    number: found.number.clone(),
+                })
+        {
+            return WriteResult::unresolved("deletion request differs from retained intent");
+        }
+        let order = &marker.order;
+        if request.mode == DeleteMode::NamespaceOwned {
+            match self
+                .lookup_ours(external_id, order, crate::identity::IssuedKind::Proforma)
+                .await
+            {
+                Ok(OwnershipOutcome::Live(current) | OwnershipOutcome::Reversed(current))
+                    if current.number == found.number
+                        && current.document_id == found.document_id => {}
+                Ok(OwnershipOutcome::CredentialsRejected(answer)) => {
+                    answer.warn_credentials_rejected(external_id.namespace());
+                    return WriteResult::unresolved(format!(
+                        "deletion namespace credentials rejected: {}",
+                        answer.code
+                    ));
+                }
+                Ok(OwnershipOutcome::Absent) => {
+                    return WriteResult::unresolved(
+                        "deletion namespace holder absent; absence does not settle deletion",
+                    );
+                }
+                Ok(OwnershipOutcome::Api(answer)) => {
+                    return WriteResult::unresolved(format!(
+                        "deletion namespace vendor code {}",
+                        answer.code
+                    ));
+                }
+                Err(cause) => {
+                    return WriteResult::unresolved(format!(
+                        "deletion namespace query unanswered: {cause}"
+                    ));
+                }
+                _ => {
+                    return WriteResult::unresolved(
+                        "deletion namespace target changed or collided",
+                    );
+                }
+            }
+        }
+        match self.delete_proforma(found, order, request.force).await {
+            DeleteOutcome::Deleted => WriteResult::Delete(DeleteOutcome::Deleted),
+            DeleteOutcome::CredentialsRejected(answer) => {
+                answer.warn_credentials_rejected(external_id.namespace());
+                WriteResult::unresolved(format!("deletion credentials rejected: {}", answer.code))
+            }
+            DeleteOutcome::AlreadyGone => WriteResult::unresolved(
+                "proforma reported absent; absence does not settle earlier deletion",
+            ),
+            DeleteOutcome::Paid => WriteResult::unresolved(
+                "fresh deletion paid guard refused; earlier deletion remains unresolved",
+            ),
+            DeleteOutcome::TargetChanged => WriteResult::unresolved(
+                "fresh deletion target changed; earlier deletion remains unresolved",
+            ),
+            DeleteOutcome::Api(answer) => {
+                WriteResult::unresolved(format!("deletion guard vendor code {}", answer.code))
+            }
+            DeleteOutcome::Rejected(rejection) => WriteResult::unresolved(format!(
+                "deletion refused: {}; earlier execution remains unresolved",
+                rejection.code
+            )),
+            DeleteOutcome::Inconclusive(answer) => {
+                WriteResult::unresolved(format!("inconclusive deletion code {}", answer.code))
+            }
+            DeleteOutcome::GuardFailed(cause) => {
+                WriteResult::unresolved(format!("deletion guard unanswered: {cause}"))
+            }
+            DeleteOutcome::Lost(cause) => {
+                WriteResult::unresolved(format!("deletion answer lost: {cause}"))
+            }
+        }
+    }
+
+    /// Replay-enabled Order storno: settle existing evidence before inspecting
     /// fresh send guards; only the pinned live original can authorize replay.
-    pub(crate) async fn request_response_storno(
+    pub(crate) async fn storno_replay_enabled(
         &self,
         request: super::StornoStepRequest<'_>,
         marker: &UnresolvedWrite,
@@ -290,7 +385,7 @@ impl Gateway {
             Err(cause) => WriteResult::Unresolved(WriteDiagnostic::unconfirmed(cause)),
         }
     }
-    /// #247 only: open-run replay may submit again after fresh absence and
+    /// Replay-enabled creation: open-run replay may submit again after fresh absence and
     /// guards. Kept distinct from the public consumed-permission contract.
     #[allow(
         clippy::too_many_lines,
@@ -307,11 +402,7 @@ impl Gateway {
     {
         use crate::identity::{DocumentKind, IssuedKind};
         // Defence in depth: this seam is never a blanket permission for kinds.
-        if !matches!(
-            request.kind,
-            IssuedKind::Invoice | IssuedKind::Proforma | IssuedKind::Prepayment | IssuedKind::Final
-        ) || request.corrected_number.is_some()
-        {
+        if request.replay_contract().is_none() || request.corrected_number.is_some() {
             return WriteResult::unresolved("unsupported replay-enabled issuance intent");
         }
         // After admission a different matching holder is replacement evidence,
@@ -332,20 +423,20 @@ impl Gateway {
             }
             Ok(_) => {
                 return WriteResult::unresolved(
-                    "ordinary holder does not permit the retained issuance intent",
+                    "holder does not permit the retained issuance intent",
                 );
             }
             Err(QueryError::CredentialsRejected(answer)) => {
                 answer.warn_credentials_rejected(request.external_id.namespace());
                 return WriteResult::unresolved(format!(
-                    "ordinary holder credentials rejected: {}",
+                    "holder credentials rejected: {}",
                     answer.code
                 ));
             }
-            Err(_) => return WriteResult::unresolved("ordinary holder query failed"),
+            Err(_) => return WriteResult::unresolved("holder query failed"),
         }
         let Ok(namespace) = request.external_id.namespace().parse() else {
-            return WriteResult::unresolved("invalid ordinary namespace");
+            return WriteResult::unresolved("invalid issuance namespace");
         };
         let proforma = request.proforma_number();
         let prepayment = request.prepayment_number();
@@ -402,7 +493,7 @@ impl Gateway {
                 }
                 _ => {
                     return WriteResult::unresolved(format!(
-                        "fresh {kind} guard did not permit ordinary issuance"
+                        "fresh {kind} guard did not permit issuance"
                     ));
                 }
             }
@@ -465,15 +556,16 @@ impl Gateway {
                     || (!found.is_invoice_family()
                         && found.document_type != szamlazz_agent::DocumentType::Proforma) => {}
             _ => {
-                return WriteResult::unresolved(
-                    "fresh order hint did not permit ordinary issuance",
-                );
+                return WriteResult::unresolved("fresh order hint did not permit issuance");
             }
         }
         before_send().await;
         replay_create_result(
-            self.create_send_with_duplicate_evidence(&request, true, true)
-                .await,
+            self.create_send(
+                &request,
+                super::CreateSettlement::RetainedWithDuplicateEvidence,
+            )
+            .await,
             request.external_id.namespace(),
         )
     }
@@ -588,7 +680,10 @@ impl Gateway {
             }
             Err(super::QueryError::Transport(message)) => return WriteResult::unresolved(message),
         }
-        match self.create_send(&request, true).await {
+        match self
+            .create_send(&request, super::CreateSettlement::Retained)
+            .await
+        {
             Ok(outcome) => WriteResult::Create(outcome),
             // Uncertain sends continue through the shared read-only evidence seam.
             Err(cause) => WriteResult::Unresolved(WriteDiagnostic::unconfirmed(cause)),
@@ -894,15 +989,15 @@ fn replay_create_result(
         ) => WriteResult::Create(outcome),
         Ok(CreateOutcome::CredentialsRejected(answer)) => {
             answer.warn_credentials_rejected(namespace);
-            WriteResult::unresolved(format!("ordinary credentials rejected: {}", answer.code))
+            WriteResult::unresolved(format!("issuance credentials rejected: {}", answer.code))
         }
         Ok(CreateOutcome::Rejected(rejection)) => {
-            WriteResult::unresolved(format!("ordinary refusal: {}", rejection.code))
+            WriteResult::unresolved(format!("issuance refusal: {}", rejection.code))
         }
         Ok(CreateOutcome::DuplicateOrderNumber { answer, .. }) => {
-            WriteResult::unresolved(format!("ordinary duplicate refusal: {}", answer.code))
+            WriteResult::unresolved(format!("issuance duplicate refusal: {}", answer.code))
         }
-        Ok(_) => WriteResult::unresolved("ordinary guard or query did not establish issuance"),
+        Ok(_) => WriteResult::unresolved("guard or query did not establish issuance"),
         Err(cause) => WriteResult::Unresolved(WriteDiagnostic::unconfirmed(cause)),
     }
 }
@@ -1314,7 +1409,7 @@ mod tests {
                         None,
                     )
                     .expect("consistent create intent"),
-                    true,
+                    crate::gateway::CreateSettlement::Retained,
                 )
                 .await
                 .expect("settled refusal");

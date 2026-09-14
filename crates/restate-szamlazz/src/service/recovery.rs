@@ -63,22 +63,16 @@ pub(super) struct ReplayIntent {
 impl<'de> serde::Deserialize<'de> for ReplayIntent {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         let marker = UnresolvedWrite::deserialize(de)?;
-        if !valid_execution_contract(&marker) || marker.execution_contract.is_none() {
-            return Err(serde::de::Error::custom(
-                "ordinary intent requires execution contract",
-            ));
-        }
-        Ok(Self { marker })
+        Self::new(marker).map_err(serde::de::Error::custom)
     }
 }
 
 impl ReplayIntent {
-    pub(super) fn new(mut marker: UnresolvedWrite) -> Self {
-        if marker.execution_contract.is_none() {
-            marker.execution_contract =
-                Some(crate::contract::recovery::ReplayExecutionContract::RequestResponseOrdinaryV1);
+    pub(super) fn new(marker: UnresolvedWrite) -> Result<Self, &'static str> {
+        if marker.execution_contract.is_none() || !valid_execution_contract(&marker) {
+            return Err("replay intent requires a valid operation-specific execution contract");
         }
-        Self { marker }
+        Ok(Self { marker })
     }
 }
 
@@ -493,7 +487,33 @@ pub(super) async fn guard(ctx: &ObjectContext<'_>) -> Result<(), HandlerError> {
 }
 
 impl Execution {
-    pub(super) async fn request_response_storno(
+    fn write_marker(
+        &self,
+        ctx: &ObjectContext<'_>,
+        order: &OrderKey,
+        external_id: &ExternalId,
+        operation: WriteOperation,
+    ) -> UnresolvedWrite {
+        UnresolvedWrite {
+            execution_contract: None,
+            proforma_number: None,
+            prepayment_number: None,
+            version: MarkerVersion,
+            token: ctx.invocation_id().to_owned(),
+            owner_invocation: ctx.invocation_id().to_owned(),
+            created_at: String::new(),
+            scope: ctx.scope().map(str::to_owned),
+            order: order.clone(),
+            namespace: self.config.namespace.clone(),
+            external_id: external_id.as_str().to_owned(),
+            account_id: self.account.id.to_string(),
+            endpoint: self.account.endpoint.as_str().to_owned(),
+            credential_ref: self.account.credential_ref.to_string(),
+            operation,
+        }
+    }
+
+    pub(super) async fn storno_replay_enabled(
         &self,
         ctx: &ObjectContext<'_>,
         order: &OrderKey,
@@ -509,24 +529,16 @@ impl Execution {
             };
         let marker = UnresolvedWrite {
             execution_contract: Some(contract),
-            proforma_number: None,
-            prepayment_number: None,
-            version: MarkerVersion,
-            token: ctx.invocation_id().to_owned(),
-            owner_invocation: ctx.invocation_id().to_owned(),
-            created_at: String::new(),
-            scope: ctx.scope().map(str::to_owned),
-            order: order.clone(),
-            namespace: self.config.namespace.clone(),
-            external_id: request.external_id.as_str().to_owned(),
-            account_id: self.account.id.to_string(),
-            endpoint: self.account.endpoint.as_str().to_owned(),
-            credential_ref: self.account.credential_ref.to_string(),
-            operation: WriteOperation::Storno {
-                number: request.invoice_number.to_owned(),
-            },
+            ..self.write_marker(
+                ctx,
+                order,
+                request.external_id,
+                WriteOperation::Storno {
+                    number: request.invoice_number.to_owned(),
+                },
+            )
         };
-        self.request_response_write(
+        self.replay_enabled_write(
             ctx,
             order,
             request.external_id,
@@ -534,7 +546,7 @@ impl Execution {
             ReplayWrite::Storno,
             move |gateway, marker| async move {
                 gateway
-                    .request_response_storno(request, &marker, original)
+                    .storno_replay_enabled(request, &marker, original)
                     .await
             },
         )
@@ -545,44 +557,19 @@ impl Execution {
     pub(super) async fn create_replay_enabled(
         &self,
         ctx: &ObjectContext<'_>,
-        order: &OrderKey,
         request: crate::gateway::CreateStepRequest<'_>,
-        external_id: &ExternalId,
     ) -> Result<WriteResult, HandlerError> {
+        let order = request.order();
+        let external_id = request.external_id();
         let marker = UnresolvedWrite {
-            execution_contract: Some(match request.operation() {
-                WriteOperation::Create {
-                    kind: crate::identity::IssuedKind::Prepayment,
-                    ..
-                } => {
-                    crate::contract::recovery::ReplayExecutionContract::RequestResponsePrepaymentV1
-                }
-                WriteOperation::Create {
-                    kind: crate::identity::IssuedKind::Final,
-                    ..
-                } => crate::contract::recovery::ReplayExecutionContract::RequestResponseFinalV1,
-                WriteOperation::Create {
-                    kind: crate::identity::IssuedKind::Proforma,
-                    ..
-                } => crate::contract::recovery::ReplayExecutionContract::RequestResponseProformaV1,
-                _ => crate::contract::recovery::ReplayExecutionContract::RequestResponseOrdinaryV1,
-            }),
+            execution_contract: Some(request.replay_contract().ok_or_else(|| {
+                Fault::invalid_input("unsupported replay-enabled issuance intent")
+            })?),
             proforma_number: request.proforma_number().map(str::to_owned),
             prepayment_number: request.prepayment_number().map(str::to_owned),
-            version: MarkerVersion,
-            token: ctx.invocation_id().to_owned(),
-            owner_invocation: ctx.invocation_id().to_owned(),
-            created_at: String::new(),
-            scope: ctx.scope().map(str::to_owned),
-            order: order.clone(),
-            namespace: self.config.namespace.clone(),
-            external_id: external_id.as_str().to_owned(),
-            account_id: self.account.id.to_string(),
-            endpoint: self.account.endpoint.as_str().to_owned(),
-            credential_ref: self.account.credential_ref.to_string(),
-            operation: request.operation(),
+            ..self.write_marker(ctx, order, external_id, request.operation())
         };
-        self.request_response_write(
+        self.replay_enabled_write(
             ctx,
             order,
             external_id,
@@ -607,7 +594,7 @@ impl Execution {
         .await
     }
 
-    pub(super) async fn request_response_delete(
+    pub(super) async fn delete_replay_enabled(
         &self,
         ctx: &ObjectContext<'_>,
         order: &OrderKey,
@@ -615,65 +602,41 @@ impl Execution {
         found: Box<crate::gateway::FoundDocument>,
         request: crate::contract::DeleteProformaRequest,
     ) -> Result<WriteResult, HandlerError> {
-        let contract =
-            crate::contract::recovery::ReplayExecutionContract::RequestResponseDeleteV1 {
-                mode: request.mode,
-                force: request.force,
-                document_id: found.document_id,
-            };
+        let contract = crate::contract::recovery::ReplayExecutionContract::for_delete(
+            &request,
+            found.document_id,
+        );
         let marker = UnresolvedWrite {
             execution_contract: Some(contract),
-            proforma_number: None,
-            prepayment_number: None,
-            version: MarkerVersion,
-            token: ctx.invocation_id().to_owned(),
-            owner_invocation: ctx.invocation_id().to_owned(),
-            created_at: String::new(),
-            scope: ctx.scope().map(str::to_owned),
-            order: order.clone(),
-            namespace: self.config.namespace.clone(),
-            external_id: external_id.as_str().to_owned(),
-            account_id: self.account.id.to_string(),
-            endpoint: self.account.endpoint.as_str().to_owned(),
-            credential_ref: self.account.credential_ref.to_string(),
-            operation: WriteOperation::Delete {
-                number: found.number.clone(),
-            },
+            ..self.write_marker(
+                ctx,
+                order,
+                external_id,
+                WriteOperation::Delete {
+                    number: found.number.clone(),
+                },
+            )
         };
-        self.request_response_write(ctx,order,external_id,marker,ReplayWrite::Delete,move |gateway,marker| async move {
-            if marker.execution_contract!=Some(contract) || marker.operation!=(WriteOperation::Delete {number:found.number.clone()}) {
-                return WriteResult::unresolved("deletion request differs from retained intent");
-            }
-            if request.mode==crate::contract::DeleteMode::NamespaceOwned {
-                match gateway.lookup_ours(external_id,order,crate::identity::IssuedKind::Proforma).await {
-                    Ok(crate::gateway::OwnershipOutcome::Live(current)|crate::gateway::OwnershipOutcome::Reversed(current)) if current.number==found.number && current.document_id==found.document_id => {},
-                    Ok(crate::gateway::OwnershipOutcome::CredentialsRejected(answer)) => { answer.warn_credentials_rejected(external_id.namespace());return WriteResult::unresolved(format!("deletion namespace credentials rejected: {}",answer.code)); },
-                    Ok(crate::gateway::OwnershipOutcome::Absent)=>return WriteResult::unresolved("deletion namespace holder absent; absence does not settle deletion"),
-                    Ok(crate::gateway::OwnershipOutcome::Api(answer))=>return WriteResult::unresolved(format!("deletion namespace vendor code {}",answer.code)),
-                    Err(cause)=>return WriteResult::unresolved(format!("deletion namespace query unanswered: {cause}")),
-                    _=>return WriteResult::unresolved("deletion namespace target changed or collided"),
-                }
-            }
-            match gateway.delete_proforma(&found,order,request.force).await {
-                crate::gateway::DeleteOutcome::Deleted=>WriteResult::Delete(crate::gateway::DeleteOutcome::Deleted),
-                crate::gateway::DeleteOutcome::CredentialsRejected(answer)=>{answer.warn_credentials_rejected(external_id.namespace());WriteResult::unresolved(format!("deletion credentials rejected: {}",answer.code))},
-                crate::gateway::DeleteOutcome::AlreadyGone=>WriteResult::unresolved("proforma reported absent; absence does not settle earlier deletion"),
-                crate::gateway::DeleteOutcome::Paid=>WriteResult::unresolved("fresh deletion paid guard refused; earlier deletion remains unresolved"),
-                crate::gateway::DeleteOutcome::TargetChanged=>WriteResult::unresolved("fresh deletion target changed; earlier deletion remains unresolved"),
-                crate::gateway::DeleteOutcome::Api(answer)=>WriteResult::unresolved(format!("deletion guard vendor code {}",answer.code)),
-                crate::gateway::DeleteOutcome::Rejected(rejection)=>WriteResult::unresolved(format!("deletion refused: {}; earlier execution remains unresolved",rejection.code)),
-                crate::gateway::DeleteOutcome::Inconclusive(answer)=>WriteResult::unresolved(format!("inconclusive deletion code {}",answer.code)),
-                crate::gateway::DeleteOutcome::GuardFailed(cause)=>WriteResult::unresolved(format!("deletion guard unanswered: {cause}")),
-                crate::gateway::DeleteOutcome::Lost(cause)=>WriteResult::unresolved(format!("deletion answer lost: {cause}")),
-            }
-        }).await
+        self.replay_enabled_write(
+            ctx,
+            order,
+            external_id,
+            marker,
+            ReplayWrite::Delete,
+            move |gateway, marker| async move {
+                gateway
+                    .delete_replay_enabled(external_id, &marker, &found, &request)
+                    .await
+            },
+        )
+        .await
     }
 
     #[allow(
         clippy::too_many_arguments,
-        reason = "one shared durable boundary for the two approved mutation contracts"
+        reason = "one shared durable sequence for replay-enabled creates, deletion and storno"
     )]
-    async fn request_response_write<F, Fut>(
+    async fn replay_enabled_write<F, Fut>(
         &self,
         ctx: &ObjectContext<'_>,
         order: &OrderKey,
@@ -687,12 +650,13 @@ impl Execution {
         Fut: Future<Output = WriteResult> + Send,
     {
         let step = operation.step();
-        let expected_contract = marker.execution_contract;
+        let intent = ReplayIntent::new(marker).map_err(Fault::invalid_input)?;
+        let expected_contract = intent.marker.execution_contract;
         let intent = ctx
             .run(|| async move {
-                let mut marker = marker;
-                marker.created_at = jiff::Timestamp::now().to_string();
-                Ok(journal(ReplayIntent::new(marker)))
+                let mut intent = intent;
+                intent.marker.created_at = jiff::Timestamp::now().to_string();
+                Ok(journal(intent))
             })
             .name(format!("prepare-{step}-write"))
             .await
@@ -730,7 +694,7 @@ impl Execution {
                     match self.gateway().await {
                         Ok(gateway) => write(gateway, marker.clone()).await,
                         Err(_) => WriteResult::unresolved(
-                            "pinned account unavailable inside ordinary write",
+                            "pinned account unavailable inside replay-enabled write",
                         ),
                     }
                 } else {
@@ -749,10 +713,10 @@ impl Execution {
         let result = if let WriteResult::Unresolved(original) = result {
             ctx.run(|| async {
                 super::prologue::mark_fresh_work();
-                let gateway = self.gateway().await.map_err(|_| std::io::Error::other(format!("ordinary write unresolved; original: {}; latest reconciliation: pinned account unavailable", original.reason)))?;
+                let gateway = self.gateway().await.map_err(|_| std::io::Error::other(format!("replay-enabled write unresolved; original: {}; latest reconciliation: pinned account unavailable", original.reason)))?;
                 let result = gateway.reconcile_write_diagnostic(marker, &original).await;
                 if let WriteResult::Unresolved(latest) = &result {
-                    return Err(std::io::Error::other(format!("ordinary write unresolved; original: {}; latest: {}; reconciliation is read-only", original.reason, latest.reason)).into());
+                    return Err(std::io::Error::other(format!("replay-enabled write unresolved; original: {}; latest: {}; reconciliation is read-only", original.reason, latest.reason)).into());
                 }
                 self.checkpoint(order, WriteCheckpoint::Reconciled).await;
                 Ok(journal(result))
@@ -778,23 +742,7 @@ impl Execution {
         F: FnOnce(Arc<Gateway>, UnresolvedWrite) -> Fut + Send,
         Fut: Future<Output = WriteResult> + Send,
     {
-        let marker = UnresolvedWrite {
-            execution_contract: None,
-            proforma_number: None,
-            prepayment_number: None,
-            version: MarkerVersion,
-            token: ctx.invocation_id().to_owned(),
-            owner_invocation: ctx.invocation_id().to_owned(),
-            created_at: String::new(),
-            scope: ctx.scope().map(str::to_owned),
-            order: order.clone(),
-            namespace: self.config.namespace.clone(),
-            external_id: external_id.as_str().to_owned(),
-            account_id: self.account.id.to_string(),
-            endpoint: self.account.endpoint.as_str().to_owned(),
-            credential_ref: self.account.credential_ref.to_string(),
-            operation,
-        };
+        let marker = self.write_marker(ctx, order, external_id, operation);
         let marker = ctx
             .run(|| async move {
                 let mut marker = marker;

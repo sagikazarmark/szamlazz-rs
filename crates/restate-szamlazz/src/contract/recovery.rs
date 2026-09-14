@@ -162,6 +162,17 @@ pub enum ReplayExecutionContract {
     },
 }
 
+impl ReplayExecutionContract {
+    /// The same pinned deletion facts are used at admission and fresh verification.
+    pub(crate) fn for_delete(request: &super::DeleteProformaRequest, document_id: i64) -> Self {
+        Self::RequestResponseDeleteV1 {
+            mode: request.mode,
+            force: request.force,
+            document_id,
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for ReplayExecutionContract {
     fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         struct Visitor;

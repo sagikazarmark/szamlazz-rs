@@ -587,7 +587,7 @@ impl Execution {
         };
         if self.config.order_execution.permits_replay() {
             let result = self
-                .request_response_storno(ctx, &order, intent.as_step_request(), &found)
+                .storno_replay_enabled(ctx, &order, intent.as_step_request(), &found)
                 .await?;
             let crate::gateway::recovery::WriteResult::Storno(outcome) = result else {
                 return Err(Fault::outcome_unknown("unexpected recovery operation").into());

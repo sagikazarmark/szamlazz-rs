@@ -1075,19 +1075,17 @@ impl Execution {
         )
         .map_err(|error| Fault::invalid_input(error.to_string()))?;
         if self.config.order_execution.permits_replay() {
-            let result = self
-                .create_replay_enabled(ctx, order, request, &intent.identity.external_id)
-                .await?;
+            let result = self.create_replay_enabled(ctx, request).await?;
             return match result {
                 crate::gateway::recovery::WriteResult::Create(outcome) => Ok(outcome),
-                _ => Err(Fault::outcome_unknown("ordinary issuance remains unresolved").into()),
+                _ => Err(Fault::outcome_unknown("issuance remains unresolved").into()),
             };
         }
         let result = self
             .protected_write(
                 ctx,
-                order,
-                &intent.identity.external_id,
+                request.order(),
+                request.external_id(),
                 request.operation(),
                 format!("create-{kind}"),
                 move |gateway, _marker| async move { gateway.protected_create(request).await },
