@@ -30,6 +30,14 @@ failure-output = "immediate"
 path = "junit.xml"
 store-success-output = true
 
+# Requires the examples/workers release bundle and npm dependencies. Kept out
+# of native e2e so the native suite doesn't acquire a Node/build prerequisite.
+[profile.workers]
+default-filter = 'package(restate-szamlazz) & binary(=workers) & test(/(^|::)e2e_workers_/)'
+test-threads = 1
+retries = 0
+slow-timeout = { period = "60s", terminate-after = 5 }
+
 [profile.probes]
 default-filter = 'package(szamlazz-agent) & binary(=probes)'
 test-threads = 1

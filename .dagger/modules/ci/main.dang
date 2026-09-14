@@ -154,6 +154,29 @@ type Ci {
   }
 
   """
+  Actual Rust Order/Agent in workerd: release bundle, Fetch transport checks,
+  signed/scoped Restate execution and retained uncertainty across replacement.
+  The example owns its pinned interim SDK override; native CI keeps crates.io.
+  """
+  workers: String! @check {
+    let host = self.provisioned
+      .withExec(["sh", "-c", "apt-get update && apt-get install -y --no-install-recommends nodejs npm pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*"])
+      .withExec(["rustup", "target", "add", "wasm32-unknown-unknown"])
+      .withExec(["cargo", "install", "worker-build", "--version", "0.8.5", "--locked"])
+      .withFile("/usr/local/bin/restate-server", self.restateServer)
+      .withEnvVariable("RESTATE_SERVER_BIN", "/usr/local/bin/restate-server")
+      .withEnvVariable("CI", "true")
+      .withWorkdir("/work/src/examples/workers")
+      .withExec(["npm", "ci"])
+      .withExec(["worker-build", "--release", "--no-panic-recovery", "--locked"])
+      .withExec(["worker-build", "--release", "--no-panic-recovery", "--locked", "--features", "acceptance-tests"])
+      .withExec(["npm", "test"])
+      .withWorkdir("/work/src")
+      .withExec(["cargo", "test", "-p", "restate-szamlazz", "--locked", "--test", "workers", "e2e_workers_signed_scoped_ordinary", "--", "--exact", "--ignored", "--nocapture"])
+    host.combinedOutput
+  }
+
+  """
   An external run, then its JUnit and kept server logs on failure, preserving
   the run's exit status. NEXTEST_PROFILE is selected by the calling function;
   optional nextest arguments are passed as shell positional arguments.

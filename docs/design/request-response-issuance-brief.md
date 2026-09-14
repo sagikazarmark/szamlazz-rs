@@ -164,9 +164,9 @@ generic mock of every Gateway method or treat source/binary searches as runtime 
 - [x] Actual-service RequestResponse ordinary issuance slice passes the native buffered-host failure matrix (see `tests/request_response`); workerd acceptance remains below.
 - [ ] Production outcome/clearance table and mutation capability matrix approved.
 - [ ] Legacy marker/recovery and immutable-deployment migration procedure approved.
-- [ ] Actual Order/Agent workers-rs release bundle builds with a documented feature graph.
-- [ ] Real Restate + workerd verify signed/scoped execution, replay, pause and recovery.
-- [ ] Native and Workers transport behavior and deadline/cancellation checks pass.
+- [x] Actual Order/Agent workers-rs experimental release bundle builds with a documented feature graph (`examples/workers`).
+- [x] Real Restate + workerd verify signed/scoped execution, replay, pause and automatic read-only reconciliation; operator recovery remains blocked by the slice.
+- [x] Workers transport, complete-body deadline and dropped-exchange cancellation checks pass; Fetch comma-header refusal is an explicitly accepted experimental restriction.
 - [ ] Required native regressions pass; CI includes bundle and runtime checks.
 - [ ] Embedding, provider-setting prerequisite, residual risk and unsupported operations documented.
 - [ ] Prototype evidence is durably published with the change before it is used as an external reference.

@@ -1,7 +1,8 @@
 //! Allowlisted diagnostic projection. Never format an upstream error or source.
 //! The strings returned here are safe to retain in run failures and outcomes.
 
-use szamlazz_agent::{ClientError, ErrorCode, ParseError};
+use super::transport::ClientError;
+use szamlazz_agent::{ErrorCode, ParseError};
 
 use super::Unanswered;
 
@@ -17,6 +18,8 @@ pub(super) fn credential_message(code: &str) -> Option<&'static str> {
 
 pub(super) fn exchange(operation: &str, error: &ClientError) -> Unanswered {
     let category = match error {
+        #[cfg(target_arch = "wasm32")]
+        ClientError::Exchange(message) => message,
         ClientError::ServiceUnavailable(_) => {
             return Unanswered::Unavailable(format!("{operation}: szlahu_down"));
         }
@@ -33,9 +36,13 @@ pub(super) fn exchange(operation: &str, error: &ClientError) -> Unanswered {
             _ => "parse: unclassified failure",
         },
         ClientError::Transport(transport) => {
+            #[cfg(not(target_arch = "wasm32"))]
+            let connection = transport.is_connect();
+            #[cfg(target_arch = "wasm32")]
+            let connection = false;
             let category = if transport.is_timeout() {
                 "timeout"
-            } else if transport.is_connect() {
+            } else if connection {
                 "connection"
             } else if transport.is_redirect() {
                 "redirect"

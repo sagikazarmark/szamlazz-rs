@@ -80,6 +80,7 @@ mod ingress;
 mod journal;
 mod prologue;
 mod recovery;
+mod runtime;
 mod status;
 mod storno;
 mod support;

@@ -152,3 +152,25 @@ reproduces the prototype's visible/invisible writes, recorded uncertainty,
 replacement, surviving execution, pause/resume and kill cases, plus changed guards
 and credential initialization. These native buffered-host results do not approve
 the production settlement/migration gates or establish Workers runtime support.
+
+## Workers host experiment (2026-09-14)
+
+The [workers-rs example](../../examples/workers/README.md) now builds and runs the
+actual restricted services in workerd with the pinned interim SDK fix. Signed,
+scoped issuance, open-execution replacement, retained uncertainty, pause/resume,
+active cancellation and kill are exercised through real Restate. This does not
+approve the remaining production capability/settlement/migration gates.
+
+Reqwest's WASM backend was tried first; a workerd test observed a `307` forwarding
+the credential-bearing POST. Its absent redirect-policy control requires a small
+Fetch exchange for the default WASM Gateway. Native reqwest and shared operation
+serialization/parsing remain. Fetch uses manual redirects, a full-response deadline,
+drop-triggered abortion and explicit no-session persistence (XML reauthentication).
+
+**Accepted experimental restriction, user decision:** Fetch combines repeated
+non-cookie headers irreversibly. Refuse every literal-comma `szlahu_*` value as an
+inconclusive exchange before parsing. This also refuses legitimate comma-containing
+header values, including comma-decimal fallback metadata; it does not manufacture
+combined document identities. Native first-header semantics remain unchanged.
+The runtime tests establish fake-provider behavior; provider reauthentication rests
+on the documented no-session premise, not a new live-account observation.

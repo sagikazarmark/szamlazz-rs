@@ -32,7 +32,10 @@ provider duplicate-order checking, and accepts unfinished-run resubmission risk.
 Recorded uncertainty stays read-only; other mutations are refused. See the
 [actual-service experiment](tests/request_response/README.md) and
 [outcome/clearance table](../../docs/design/request-response-outcomes.md).
-This is not production Workers support; the table below describes the default services.
+The [workers-rs example](../../examples/workers/README.md) now exercises this slice
+in workerd with signed/scoped Restate calls. It documents the interim SDK patch,
+Fetch transport restriction and runtime checks. Production capability/settlement
+and migration approvals remain open; the table below describes the default services.
 
 | Operation | Protection and recovery |
 |---|---|

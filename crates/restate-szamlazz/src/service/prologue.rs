@@ -278,7 +278,7 @@ pub(super) struct TimedOut {
 ///
 /// [`TimedOut`] when the deadline passed without an answer.
 async fn bounded<T>(call: BoundedCall, future: impl Future<Output = T>) -> Result<T, TimedOut> {
-    tokio::time::timeout(CALL_DEADLINE, future)
+    super::runtime::timeout(CALL_DEADLINE, future)
         .await
         .map_err(|_elapsed| TimedOut { call })
 }
@@ -442,7 +442,7 @@ async fn fetch_credentials(accounts: &Accounts, account: &Account) -> Result<Cre
             "credential store unavailable; retrying"
         );
         attempt += 1;
-        tokio::time::sleep(FETCH_PAUSE).await;
+        super::runtime::sleep(FETCH_PAUSE).await;
     }
 }
 

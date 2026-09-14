@@ -96,8 +96,8 @@ use szamlazz_agent::ops::proforma::{DeleteProforma, ProformaSelector};
 use szamlazz_agent::ops::query_xml::QueryInvoiceXml;
 use szamlazz_agent::ops::taxpayer::{QueryTaxpayer, TaxpayerPrefix};
 use szamlazz_agent::{
-    ApiError, Client, ClientError, Credentials, Date, ErrorCode, InvoiceNumber, InvoiceSelector,
-    OutcomeClass, reqwest,
+    ApiError, Client, Credentials, Date, ErrorCode, InvoiceNumber, InvoiceSelector, OutcomeClass,
+    reqwest,
 };
 use tracing::Instrument as _;
 
@@ -107,6 +107,8 @@ use crate::identity::{ExternalId, OrderKey};
 
 pub mod build;
 mod diagnostic;
+mod transport;
+use transport::ClientError;
 pub mod document;
 pub mod recovery;
 
@@ -291,7 +293,7 @@ impl<'de> Deserialize<'de> for RejectionCode {
 /// in an `Arc` for the execution.
 #[derive(Debug)]
 pub struct Gateway {
-    client: Client,
+    client: transport::Client,
     account: Account,
 }
 
@@ -1183,19 +1185,33 @@ impl Gateway {
     /// # Errors
     ///
     /// Returns an error when the HTTP client cannot be constructed.
+    ///
+    /// On `wasm32`, uses a Fetch exchange with manual redirects and a deadline
+    /// covering the full body. No session cookies are persisted: each XML request
+    /// reauthenticates. JS futures are confined to the executing host thread.
+    /// Actual-service Workers support is currently the explicit #247 experiment;
+    /// see `examples/workers` in the repository for its pinned SDK prerequisite.
     pub fn open(account: Account, credentials: Credentials) -> Result<Self, BuildError> {
-        let http = reqwest::Client::builder()
-            .cookie_store(true)
-            .timeout(szamlazz_agent::client::REQUEST_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .build()?;
-        let client = Client::builder()
-            .credentials(credentials)
-            .endpoint(account.endpoint.as_str())
-            .http_client(http)
-            .build()?;
-        Ok(Self { client, account })
+        #[cfg(target_arch = "wasm32")]
+        {
+            let client = transport::Client::new(account.endpoint.as_str().to_owned(), credentials);
+            Ok(Self { client, account })
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let http = reqwest::Client::builder()
+                .cookie_store(true)
+                .timeout(szamlazz_agent::client::REQUEST_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .build()?;
+            let client = Client::builder()
+                .credentials(credentials)
+                .endpoint(account.endpoint.as_str())
+                .http_client(http)
+                .build()?;
+            Ok(Self { client, account })
+        }
     }
 
     /// Opens the gateway as [`Gateway::open`] does, over the caller's own
@@ -1237,6 +1253,8 @@ impl Gateway {
             .endpoint(account.endpoint.as_str())
             .http_client(http)
             .build()?;
+        #[cfg(target_arch = "wasm32")]
+        let client = client.into();
         Ok(Self { client, account })
     }
 
