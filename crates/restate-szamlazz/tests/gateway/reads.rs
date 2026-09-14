@@ -11,6 +11,54 @@ use rust_decimal::dec;
 use wiremock::ResponseTemplate;
 
 #[tokio::test]
+async fn transient_query_codes_remain_unanswered_until_a_document_is_reported() {
+    for code in ["1", "55"] {
+        let h = Harness::start().await;
+        super::common::external_id_query(external_id().as_str())
+            .respond_with(body_error(code, "PRIVATE-DIAGNOSTIC"))
+            .up_to_n_times(2)
+            .expect(2)
+            .mount(&h.server)
+            .await;
+        super::common::external_id_query(external_id().as_str())
+            .respond_with(Doc::new("SZ-1", "SZ").response())
+            .expect(1)
+            .mount(&h.server)
+            .await;
+
+        // Both the reduced mutation read and the explicit-query projection
+        // classify at the shared read boundary, before journaling an outcome.
+        let result = h.observe_create().await;
+        assert!(matches!(&result, Err(Unanswered::Unavailable(message)) if message.contains(code)));
+        assert!(!format!("{result:?}").contains("PRIVATE-"));
+        let selector = Selector::ExternalId(external_id().to_string());
+        assert!(matches!(
+            h.gateway.query(&selector).await,
+            Err(Unanswered::Unavailable(_))
+        ));
+        assert!(
+            matches!(h.gateway.query(&selector).await, Ok(QueryOutcome::Found(found)) if found.invoice_number == "SZ-1")
+        );
+        assert_eq!(h.bodies().await.len(), 3);
+        h.server.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn an_unknown_query_code_remains_an_unclassified_answer() {
+    let h = Harness::start().await;
+    number_query("SZ-1")
+        .respond_with(body_error("999", "unknown"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    assert_eq!(
+        h.gateway.verify("SZ-1").await,
+        Ok(QueryOutcome::Api(SzamlazzAnswer::new("999", "unknown")))
+    );
+}
+
+#[tokio::test]
 async fn document_reads_refuse_missing_and_mismatched_identity() {
     let h = Harness::start().await;
     for number in ["", " \t\n", "SZ-OTHER"] {

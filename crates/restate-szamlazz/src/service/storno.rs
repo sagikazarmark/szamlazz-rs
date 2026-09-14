@@ -745,7 +745,7 @@ mod tests {
         fn run<T, F, Fut>(
             &self,
             name: String,
-            _policy: restate_sdk::prelude::RunRetryPolicy,
+            _policy: Option<restate_sdk::prelude::RunRetryPolicy>,
             f: F,
         ) -> crate::account::BoxFuture<'ctx, Result<T, TerminalError>>
         where

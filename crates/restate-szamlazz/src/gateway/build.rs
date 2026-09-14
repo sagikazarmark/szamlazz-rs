@@ -197,8 +197,8 @@ impl Account {
                 .number_prefix
                 .clone()
                 .or_else(|| defaults.number_prefix.clone()),
-            // Preserve the worker's wire contract: false omits `fizetve`.
-            paid: document.paid.then_some(true),
+            // Preserve omission and both explicit values of `fizetve`.
+            paid: document.paid,
             template: overrides
                 .template
                 .as_deref()
@@ -311,7 +311,7 @@ mod tests {
         let mut document = sample_document();
         document.buyer.name = "  Kova\u{301}cs Bt.  ".to_owned();
         document.issue_date = Some(date(2026, 9, 3));
-        document.paid = true;
+        document.paid = Some(true);
         let create = gateway
             .build_create(
                 IssuedKind::Invoice,
@@ -371,9 +371,9 @@ mod tests {
     }
 
     #[test]
-    fn paid_boolean_preserves_omission_or_true_on_the_wire() {
+    fn paid_preserves_omission_false_and_true_on_the_wire() {
         let gateway = gateway(&json!({}));
-        for paid in [false, true] {
+        for paid in [None, Some(false), Some(true)] {
             let mut document = sample_document();
             document.paid = paid;
             let create = gateway
@@ -387,8 +387,13 @@ mod tests {
                 .expect("build");
             let xml =
                 String::from_utf8(create.write_xml(&Credentials::agent_key("key"))).expect("UTF-8");
-            assert_eq!(xml.contains("<fizetve>true</fizetve>"), paid);
-            assert!(!xml.contains("<fizetve>false</fizetve>"));
+            assert_eq!(create.header.paid, paid);
+            assert_eq!(xml.contains("<fizetve>true</fizetve>"), paid == Some(true));
+            assert_eq!(
+                xml.contains("<fizetve>false</fizetve>"),
+                paid == Some(false)
+            );
+            assert_eq!(xml.contains("<fizetve>"), paid.is_some());
         }
     }
 

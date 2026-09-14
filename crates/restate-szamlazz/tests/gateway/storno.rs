@@ -16,6 +16,44 @@ use rust_decimal::dec;
 use wiremock::ResponseTemplate;
 
 #[tokio::test]
+async fn leading_storno_transient_codes_remain_answers_distinct_from_the_down_header() {
+    for code in [Some("1"), Some("55"), None] {
+        let h = Harness::start().await;
+        let id = storno_id();
+        external_id_query(id.as_str())
+            .respond_with(code.map_or_else(szlahu_down, |code| {
+                api_error(code, "maintenance or signing")
+            }))
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        storno()
+            .respond_with(created("SS-1", "-1000", "-1270"))
+            .expect(0)
+            .mount(&h.server)
+            .await;
+        // Ok is settled data for the unmanaged issue run, not a retryable
+        // Unconfirmed error. No mutation, immediate reconciliation or retry.
+        let result = h
+            .gateway
+            .storno(storno_request(&id))
+            .await
+            .expect("answered leading check");
+        match code {
+            Some(code) => assert_eq!(
+                result,
+                StornoOutcome::Api(SzamlazzAnswer::new(code, "maintenance or signing"))
+            ),
+            None => assert!(
+                matches!(result, StornoOutcome::Unavailable { message } if message == "query: szlahu_down")
+            ),
+        }
+        assert_eq!(h.bodies().await.len(), 1);
+        h.server.verify().await;
+    }
+}
+
+#[tokio::test]
 async fn immediate_reconciliation_preserves_a_reported_warning_for_the_same_storno() {
     let h = Harness::start().await;
     let id = storno_id();
@@ -559,7 +597,9 @@ async fn inconclusive_storno_identity_uses_external_id_reconciliation() {
                 );
             } else {
                 match outcome {
-                    Err(Unconfirmed::StornoVerification { number, message }) => {
+                    Err(Unconfirmed::StornoVerification {
+                        number, message, ..
+                    }) => {
                         assert_eq!(number, "SS-1", "{label}");
                         assert!(message.contains(cause), "{label}: {message}");
                     }

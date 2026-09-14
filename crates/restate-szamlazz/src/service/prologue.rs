@@ -24,7 +24,7 @@ use szamlazz_agent::Credentials;
 use tracing::Instrument as _;
 
 use super::Parts;
-use super::support::{Fault, RunCtx, is_cancelled, run_once, run_retrying};
+use super::support::{Fault, RunCtx, is_cancelled, run_once};
 use crate::account::{Account, Accounts, BoxError, FetchError, ResolveError};
 use crate::config::{ValidatedWorkerConfig, WorkerConfig, format_duration};
 use crate::gateway::Gateway;
@@ -134,10 +134,10 @@ where
 ///    with a changed namespace cannot make a running invocation issue under a
 ///    new id.
 /// 2. **Resolve** the request's scope to its account in a durable step named
-///    `account` under the resolve policy: unscoped and unknown are journaled
-///    as data and become the terminal `unknown_account`; an unavailable
-///    resolver (reporting so, or silent past [`CALL_DEADLINE`]) is
-///    retryable and journals nothing; exhaustion is `unavailable`.
+///    `account`: unscoped and unknown are journaled as data and become terminal
+///    `unknown_account`. An unavailable resolver journals no answer. Exclusive
+///    Order work retains invocation retry/pause; shared/Agent resolution uses
+///    the bounded resolve policy and returns `unavailable` on exhaustion.
 ///
 /// The account alone suffices for deterministic decisions. Fetch and open
 /// belong to [`Execution::gateway`], awaited only inside an operation run.
@@ -163,11 +163,10 @@ async fn run_prologue<'ctx, C: RunCtx<'ctx>>(
     let scope = ctx.scope().map(str::to_owned);
     let resolution = {
         let accounts = accounts.clone();
-        run_retrying(
-            ctx,
-            "account",
-            config.resolve.run_retry_policy(),
-            move || async move { resolve(&accounts, scope.as_deref()).await },
+        ctx.run(
+            "account".into(),
+            (!ctx.retains_work()).then(|| config.resolve.run_retry_policy()),
+            move || async move { Ok(resolve(&accounts, scope.as_deref()).await?) },
         )
         .await
         .map_err(|error| resolve_exhausted(&error))?
@@ -233,12 +232,10 @@ pub(super) enum Resolution {
 
 /// The bound on each call into the account resolver or the credential store
 /// (every `resolve`, every `fetch` attempt), after which the call is dropped
-/// and answered as unavailable. The worker's own constant, not a setting: the
-/// static resolver is in memory and never reaches it, and a database-backed
-/// one that has not answered in ten seconds is not going to; waiting on would
-/// only hold the execution until the handler's inactivity timeout, spending an
-/// invocation attempt on a wait the resolve policy or the fetch loop is there
-/// to retry.
+/// and treated as unavailable. Independent of retry exhaustion and execution timeouts:
+/// resolution uses invocation retry/pause for exclusive Order and the bounded
+/// resolve policy for shared/Agent calls. Fetch has its local retry loop, after
+/// which the operation boundary chooses retryable, terminal or unresolved treatment.
 pub(super) const CALL_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Which of the two calls into an embedder's trait objects the worker bounds.
@@ -283,7 +280,8 @@ async fn bounded<T>(call: BoundedCall, future: impl Future<Output = T>) -> Resul
 }
 
 /// The `account` step's one error: the resolver could not answer. Retryable
-/// to the SDK, so the resolve policy re-executes the step; its display never
+/// to the SDK: exclusive Order uses invocation retry/pause, shared/Agent calls
+/// the bounded resolve policy. Its display never
 /// echoes the resolver's own message (it becomes `last_failure`, and the
 /// exhausted step's fault text) but does tell a resolver that reported itself
 /// unavailable from one the worker gave up waiting on.
@@ -305,8 +303,8 @@ pub(super) enum ResolverUnavailable {
 /// # Errors
 ///
 /// [`ResolverUnavailable`]: the resolver answered `Unavailable`, or had not
-/// answered at the deadline. Retryable: the resolve policy re-executes the
-/// step.
+/// answered at the deadline. Retryable under the context's applicable resolution
+/// policy; exclusive Order retains invocation retry/pause.
 async fn resolve(
     accounts: &Accounts,
     scope: Option<&str>,
@@ -357,8 +355,9 @@ fn account_of(resolution: Resolution) -> Result<Account, Fault> {
 }
 
 /// The fault of an `account` step that ended without a resolution: the
-/// resolve policy is exhausted (500) or the invocation was cancelled (409).
-/// Exhaustion is `unavailable`; intentional cancellation is `cancelled`.
+/// bounded resolve policy is exhausted (500) or the invocation was cancelled (409).
+/// Bounded exhaustion is `unavailable`; intentional cancellation is `cancelled`.
+/// Exclusive Order invocation exhaustion pauses without completing this run.
 fn resolve_exhausted(error: &TerminalError) -> Fault {
     if is_cancelled(error) {
         return Fault::cancelled(format!(
@@ -373,8 +372,9 @@ fn resolve_exhausted(error: &TerminalError) -> Fault {
     ))
 }
 
-/// Fetch attempts on the first executing operation of an execution. Short by
-/// design: an outage completes that run with terminal `unavailable`.
+/// Local fetch attempts on the first executing operation of an execution. Ending
+/// this loop returns sanitized failure; the operation boundary determines whether
+/// it is retryable, terminal or retained write uncertainty.
 const FETCH_ATTEMPTS: u32 = 3;
 /// The pause before each re-fetch.
 const FETCH_PAUSE: Duration = Duration::from_millis(200);
@@ -410,12 +410,16 @@ impl FetchFailure {
 ///
 /// # Errors
 ///
-/// The terminal `unavailable` fault: the store is gone for this reference
+/// A sanitized `unavailable` fault value: the store is gone for this reference
 /// or stayed unavailable (reporting so, or not answering in time) through
-/// the retries. The operation boundary records the terminal failure on its
-/// Run command, bypassing the read/issue policy. An unfinished write may have
-/// sent on an earlier execution: the fault preserves that uncertainty. A
-/// completed run replays without reaching this function at all.
+/// the retries. Exclusive Order prerequisite reads turn it into a retryable
+/// failure inside the run, under invocation retry/pause. Shared/Agent operations
+/// and dedicated operator verification keep terminal failure on the Run command,
+/// bypassing their bounded policy; best-effort hints omit the detail. Protected
+/// writes retain conservative uncertainty after consuming permission, even if
+/// initialization prevented sending. An unfinished write may have sent during an
+/// earlier execution; this failure does not settle it. Completed runs replay
+/// without reaching this function at all.
 async fn fetch_credentials(accounts: &Accounts, account: &Account) -> Result<Credentials, Fault> {
     let mut attempt = 1;
     loop {
@@ -438,7 +442,8 @@ async fn fetch_credentials(accounts: &Accounts, account: &Account) -> Result<Cre
     }
 }
 
-/// The terminal fault of a failed credential fetch. The operator's warning
+/// The sanitized fault value of a failed credential fetch, whose lifecycle is
+/// decided at the executing operation boundary. The operator's warning
 /// names the account and the reference; the caller's message names neither
 /// (no response names the account, and a store's reference may be internal
 /// topology, a secret path), and never echoes the store's own message. It
@@ -683,8 +688,8 @@ mod tests {
     /// A resolver that never answers is bounded by the worker, not by the
     /// handler's inactivity timeout: at the deadline the `account` step's
     /// closure answers the same retryable error an unavailable resolver
-    /// does, so the resolve policy re-executes the step, and its text names
-    /// the deadline, so the exhausted step's fault says what happened.
+    /// does. The applicable resolution policy controls re-execution; the error
+    /// text names the deadline without exposing the resolver's source message.
     #[tokio::test(start_paused = true)]
     async fn a_resolver_that_never_answers_is_unavailable_at_the_deadline() {
         let (hung, accounts) = hung();
@@ -713,10 +718,11 @@ mod tests {
 
     /// A store that never answers is bounded per attempt: the fetch loop
     /// gives each of its attempts the deadline, pauses between them, and ends
-    /// in the terminal `unavailable` fault within `attempts × deadline` plus
+    /// in a sanitized `unavailable` value within `attempts × deadline` plus
     /// the pauses, never in the handler's inactivity timeout. The fault's
     /// text names the deadline and neither the account nor the credential
-    /// reference.
+    /// reference. The executing operation decides whether that value becomes
+    /// terminal or remains retryable; this test exercises the local fetch loop.
     #[tokio::test(start_paused = true)]
     async fn a_store_that_never_answers_is_the_terminal_fault_after_its_attempts() {
         const ACCOUNT: &str = "acct-8e1f";
@@ -752,8 +758,8 @@ mod tests {
     }
 
     /// A store that reports itself unavailable is asked `FETCH_ATTEMPTS`
-    /// times, `FETCH_PAUSE` apart, and then the fetch is the terminal
-    /// `unavailable` fault (never a Restate retry): within the one execution,
+    /// times, `FETCH_PAUSE` apart, and then returns a sanitized `unavailable`
+    /// value to the operation boundary: within the one execution,
     /// with no deadline spent (every answer came at once), naming the cause
     /// and neither the store's message, the account nor the reference.
     #[tokio::test(start_paused = true)]
@@ -789,9 +795,9 @@ mod tests {
         assert!(!message.contains(REF), "{message}");
     }
 
-    /// A reference the store does not know is settled: no attempt of the
-    /// loop would answer differently, so the fetch is the terminal fault at
-    /// once, after one fetch and no pause.
+    /// A reference the store does not know ends the local loop immediately:
+    /// one fetch and no pause. This does not decide the enclosing run's retry
+    /// lifecycle or settle uncertainty about an earlier write.
     #[tokio::test(start_paused = true)]
     async fn a_gone_reference_is_the_terminal_fault_after_one_fetch() {
         const REF: &str = "secrets/kv/accounts/acme/szamlazz";

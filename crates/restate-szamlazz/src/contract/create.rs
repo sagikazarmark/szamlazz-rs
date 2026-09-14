@@ -484,7 +484,9 @@ impl schemars::JsonSchema for Warning {
     }
 }
 
-/// Output of every create and correct handler.
+/// Output of every create and correct handler. This is the open wire record;
+/// use `validated()` before interpreting a known outcome. Deserialization
+/// alone does not establish that its outcome-specific payload is complete.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
@@ -559,6 +561,82 @@ pub struct CreateResponse {
 }
 
 impl CreateResponse {
+    /// Interpret the outcome only after checking its required payload.
+    ///
+    /// Issued, already-issued, reconciled and reversed outcomes require a
+    /// nonblank document number. Rejected requires a nonblank code and a
+    /// reported message (which may be empty). Conflict requires a nonblank
+    /// reason; duplicate-order-number also requires the vendor code and message,
+    /// exposed by the `DuplicateOrderNumber` view, whose existing document
+    /// number may be unreported. Totals, record IDs
+    /// and storno hints remain optional. Unknown outcome/reason tokens stay open.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first missing or unusable outcome-specific field. This
+    /// validates reported payload completeness, not provider truth or permission
+    /// to repeat a mutation. Number spelling is preserved without normalization.
+    pub fn validated(&self) -> Result<CreateResponseView<'_>, InvalidCreateResponse> {
+        fn required<'a>(
+            field: &'static str,
+            value: Option<&'a str>,
+        ) -> Result<&'a str, InvalidCreateResponse> {
+            value.ok_or(InvalidCreateResponse { field })
+        }
+        fn nonblank<'a>(
+            field: &'static str,
+            value: Option<&'a str>,
+        ) -> Result<&'a str, InvalidCreateResponse> {
+            required(field, value.filter(|value| !value.trim().is_empty()))
+        }
+        let number = || nonblank("invoice_number", self.invoice_number.as_deref());
+        let answer = || {
+            Ok((
+                nonblank("code", self.code.as_deref())?,
+                required("message", self.message.as_deref())?,
+            ))
+        };
+        Ok(match &self.outcome {
+            CreateOutcome::Issued => CreateResponseView::Issued {
+                invoice_number: number()?,
+            },
+            CreateOutcome::AlreadyIssued => CreateResponseView::AlreadyIssued {
+                invoice_number: number()?,
+            },
+            CreateOutcome::Reconciled => CreateResponseView::Reconciled {
+                invoice_number: number()?,
+            },
+            CreateOutcome::Reversed => CreateResponseView::Reversed {
+                invoice_number: number()?,
+                storno_number: self.storno_number.as_deref(),
+            },
+            CreateOutcome::Rejected => {
+                let (code, message) = answer()?;
+                CreateResponseView::Rejected { code, message }
+            }
+            CreateOutcome::Conflict => {
+                let reason = self
+                    .conflict_reason
+                    .as_ref()
+                    .filter(|reason| !reason.as_str().trim().is_empty())
+                    .ok_or(InvalidCreateResponse {
+                        field: "conflict_reason",
+                    })?;
+                if *reason == ConflictReason::DuplicateOrderNumber {
+                    let (code, message) = answer()?;
+                    CreateResponseView::DuplicateOrderNumber {
+                        code,
+                        message,
+                        existing_number: self.existing_number.as_deref(),
+                    }
+                } else {
+                    CreateResponseView::Conflict { reason }
+                }
+            }
+            CreateOutcome::Other(outcome) => CreateResponseView::Other { outcome },
+        })
+    }
+
     /// A response with the identity fields set and every optional field
     /// absent.
     #[must_use]
@@ -670,6 +748,70 @@ impl CreateResponse {
         self.warnings.push(warning);
         self
     }
+}
+
+/// A borrowed interpretation of a create response with required payload present.
+/// Optional metadata remains available on the original [`CreateResponse`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CreateResponseView<'a> {
+    /// Newly issued document.
+    Issued {
+        /// Reported document number.
+        invoice_number: &'a str,
+    },
+    /// Existing live document.
+    AlreadyIssued {
+        /// Reported document number.
+        invoice_number: &'a str,
+    },
+    /// Document found through read-only reconciliation.
+    Reconciled {
+        /// Reported document number.
+        invoice_number: &'a str,
+    },
+    /// Reversed document, with an optional reversal hint.
+    Reversed {
+        /// Reported original number.
+        invoice_number: &'a str,
+        /// Optional reported reversal number.
+        storno_number: Option<&'a str>,
+    },
+    /// Vendor refusal, including its reported message.
+    Rejected {
+        /// Vendor rejection code.
+        code: &'a str,
+        /// Vendor rejection message, possibly empty.
+        message: &'a str,
+    },
+    /// Duplicate-order-number conflict, with its required vendor answer.
+    /// The wire outcome remains `conflict` with reason `duplicate_order_number`.
+    DuplicateOrderNumber {
+        /// Vendor refusal code, checked as nonblank.
+        code: &'a str,
+        /// Reported vendor message, possibly empty.
+        message: &'a str,
+        /// Existing document number when reported, preserved verbatim.
+        existing_number: Option<&'a str>,
+    },
+    /// Other worker conflict, including an open reason token.
+    Conflict {
+        /// Worker conflict reason, including newer tokens.
+        reason: &'a ConflictReason,
+    },
+    /// Unknown outcome token; no completion or retry meaning is inferred.
+    Other {
+        /// Exact unknown token.
+        outcome: &'a str,
+    },
+}
+
+/// A required field of a known create outcome is missing or unusable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("missing or unusable create response {field}")]
+pub struct InvalidCreateResponse {
+    /// The required field's JSON name.
+    pub field: &'static str,
 }
 
 #[cfg(test)]

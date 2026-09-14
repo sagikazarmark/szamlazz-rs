@@ -382,7 +382,7 @@ pub struct DeleteProformaRequest {
     pub mode: DeleteMode,
     /// Delete even when the proforma has registered credit entries. szamlazz.hu has
     /// no guard of its own; without `force` a paid proforma is answered
-    /// `{deleted: false, reason: "proforma_paid"}`. Checked again by number
+    /// `{outcome: "conflict", reason: "proforma_paid"}`. Checked again by number
     /// inside the one-shot delete step. `force` never bypasses identity/type
     /// checks, and the fresh query and delete are not atomic against other writers.
     #[serde(default)]
@@ -408,14 +408,17 @@ impl DeleteProformaRequest {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 pub struct DeleteProformaResponse {
-    /// Whether the proforma is deleted (now or already).
-    pub deleted: bool,
-    /// Why it is not deleted (`proforma_paid`, `external_id_collision`, `target_changed`, a
-    /// szamlazz.hu error code), or `absent` when the selected lookup reports no
-    /// document. Absence does not distinguish deletion from consumption; `get`
-    /// observes only namespace-owned documents and may provide a consumption link.
+    /// Deletion, reported absence, a worker conflict, or a vendor rejection.
+    pub outcome: DeleteProformaOutcome,
+    /// Worker decision on `conflict`, never a vendor code.
     #[serde(default)]
     pub reason: Option<DeleteReason>,
+    /// Vendor rejection code on `rejected`.
+    #[serde(default)]
+    pub code: Option<String>,
+    /// Vendor rejection message on `rejected`, preserved verbatim.
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 impl DeleteProformaResponse {
@@ -423,8 +426,10 @@ impl DeleteProformaResponse {
     #[must_use]
     pub const fn deleted() -> Self {
         Self {
-            deleted: true,
+            outcome: DeleteProformaOutcome::Deleted,
             reason: None,
+            code: None,
+            message: None,
         }
     }
 
@@ -433,33 +438,104 @@ impl DeleteProformaResponse {
     #[must_use]
     pub const fn absent() -> Self {
         Self {
-            deleted: true,
-            reason: Some(DeleteReason::Absent),
+            outcome: DeleteProformaOutcome::Absent,
+            reason: None,
+            code: None,
+            message: None,
         }
     }
 
-    /// The proforma is not deleted for `reason`.
+    /// A worker guard refused deletion for `reason`.
     #[must_use]
-    pub const fn not_deleted(reason: DeleteReason) -> Self {
+    pub const fn conflict(reason: DeleteReason) -> Self {
         Self {
-            deleted: false,
+            outcome: DeleteProformaOutcome::Conflict,
             reason: Some(reason),
+            code: None,
+            message: None,
+        }
+    }
+
+    /// szamlazz.hu refused deletion with this answer.
+    #[must_use]
+    pub fn rejected(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            outcome: DeleteProformaOutcome::Rejected,
+            reason: None,
+            code: Some(code.into()),
+            message: Some(message.into()),
         }
     }
 }
 
-/// The `reason` of a [`DeleteProformaResponse`]: the worker's own tokens for
-/// what it decided before a send, or szamlazz.hu's code for what it refused.
-/// Serialises as the one string it always was (`absent`, `proforma_paid`,
-/// `external_id_collision`, `target_changed`, or the code as szamlazz.hu wrote it); `#[non_exhaustive]`
-/// and open on the way in, like every response type: a token this version
-/// does not know reads as [`DeleteReason::Other`], without inferring its origin.
+/// Open outcome token of a proforma deletion.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(with = "String"))]
+#[non_exhaustive]
+pub enum DeleteProformaOutcome {
+    /// A conclusive deletion acknowledgement.
+    Deleted,
+    /// Reported absence, not proof of deletion or settlement of an earlier send.
+    Absent,
+    /// A worker guard refused the operation; see `reason`.
+    Conflict,
+    /// The vendor refused the operation; see `code` and `message`.
+    Rejected,
+    /// A newer outcome, preserved without classification.
+    Other(String),
+}
+
+impl DeleteProformaOutcome {
+    /// Known outcomes.
+    pub const KNOWN: [Self; 4] = [Self::Deleted, Self::Absent, Self::Conflict, Self::Rejected];
+
+    /// The exact wire token.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Deleted => "deleted",
+            Self::Absent => "absent",
+            Self::Conflict => "conflict",
+            Self::Rejected => "rejected",
+            Self::Other(token) => token,
+        }
+    }
+}
+
+impl fmt::Display for DeleteProformaOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<String> for DeleteProformaOutcome {
+    fn from(token: String) -> Self {
+        match token.as_str() {
+            "deleted" => Self::Deleted,
+            "absent" => Self::Absent,
+            "conflict" => Self::Conflict,
+            "rejected" => Self::Rejected,
+            _ => Self::Other(token),
+        }
+    }
+}
+
+impl From<DeleteProformaOutcome> for String {
+    fn from(outcome: DeleteProformaOutcome) -> Self {
+        match outcome {
+            DeleteProformaOutcome::Other(token) => token,
+            known => known.as_str().to_owned(),
+        }
+    }
+}
+
+/// The worker's decision on a deletion conflict. Vendor answers have separate
+/// `code` and `message` fields; unknown worker tokens remain unclassified.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DeleteReason {
-    /// No document reported by the selected lookup (namespace slot or exact
-    /// number). Deleted earlier or consumed; reported with `deleted: true`.
-    Absent,
     /// The proforma has registered credit entries and the request did not
     /// `force`.
     ProformaPaid,
@@ -471,14 +547,11 @@ pub enum DeleteReason {
     /// number's fresh query returned a different document id, number, order
     /// or type. `force` never bypasses these guards.
     TargetChanged,
-    /// An unclassified reason: a vendor code or a worker token this version
-    /// does not know. The wire string alone cannot establish its origin.
+    /// A worker reason this version does not know.
     Other(String),
 }
 
 impl DeleteReason {
-    /// The wire string of [`DeleteReason::Absent`].
-    pub const ABSENT: &str = "absent";
     /// The wire string of [`DeleteReason::ProformaPaid`].
     pub const PROFORMA_PAID: &str = "proforma_paid";
     /// The wire string of [`DeleteReason::ExternalIdCollision`].
@@ -490,7 +563,6 @@ impl DeleteReason {
     #[must_use]
     pub fn as_str(&self) -> &str {
         match self {
-            Self::Absent => Self::ABSENT,
             Self::ProformaPaid => Self::PROFORMA_PAID,
             Self::ExternalIdCollision => Self::EXTERNAL_ID_COLLISION,
             Self::TargetChanged => Self::TARGET_CHANGED,
@@ -510,7 +582,6 @@ impl fmt::Display for DeleteReason {
 impl From<String> for DeleteReason {
     fn from(reason: String) -> Self {
         match reason.as_str() {
-            Self::ABSENT => Self::Absent,
             Self::PROFORMA_PAID => Self::ProformaPaid,
             Self::EXTERNAL_ID_COLLISION => Self::ExternalIdCollision,
             Self::TARGET_CHANGED => Self::TargetChanged,
@@ -556,7 +627,7 @@ impl schemars::JsonSchema for DeleteReason {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "Why the proforma is not deleted: `proforma_paid`, `external_id_collision`, `target_changed` (the pinned number's identity/order/type changed) or a szamlazz.hu error code; or `absent` (with `deleted: true`) when there was nothing to delete.",
+            "description": "Worker deletion conflict: proforma_paid, external_id_collision, target_changed, or an unclassified newer worker token. Vendor rejection codes are carried separately.",
         })
     }
 }
@@ -570,9 +641,8 @@ impl schemars::JsonSchema for DeleteReason {
 ///
 /// A slot is `None` when szamlazz.hu holds nothing under its external id
 /// *or* when the newest holder of the id fails validation (an external-id
-/// collision: another order or kind). A read must
-/// not fail, so `get` reports such a slot as absent; the issuing handlers
-/// refuse the same situation as `conflict{external_id_collision}`.
+/// collision: another order or kind). `collisions` distinguishes these cases;
+/// a colliding proforma slot is never inferred to be consumed.
 /// Absence does not establish that an in-flight create will never land.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -590,6 +660,9 @@ pub struct OrderStatus {
     /// The final invoice.
     #[serde(rename = "final")]
     pub r#final: Option<DocumentStatus>,
+    /// Kinds whose external-id holder failed ownership validation. Their null
+    /// slots do not establish absence. Defaults empty for older responses.
+    pub collisions: Vec<DocumentKind>,
 }
 
 impl OrderStatus {
@@ -656,7 +729,7 @@ pub struct DocumentStatus {
         feature = "schemars",
         schemars(schema_with = "super::decimal::vec_output_schema")
     )]
-    pub credit_entries: Vec<Decimal>,
+    pub credit_entry_amounts: Vec<Decimal>,
     /// The proforma this document converted (`hivdijbekszam`).
     #[serde(default)]
     pub referenced_proforma: Option<String>,
@@ -675,7 +748,7 @@ impl DocumentStatus {
             state,
             gross: None,
             net: None,
-            credit_entries: Vec::new(),
+            credit_entry_amounts: Vec::new(),
             referenced_proforma: None,
             e_invoice: None,
         }
@@ -811,7 +884,7 @@ mod tests {
         .expect("json");
         wire["invoice"]["state"] = json!(" future_state/é ");
         wire["invoice"]["gross"] = json!("25400");
-        wire["invoice"]["credit_entries"] = json!(["1000"]);
+        wire["invoice"]["credit_entry_amounts"] = json!(["1000"]);
         wire["invoice"]["future_details"] = json!({"nested": [null, true, 17, "é"]});
         // A newer state can use a known state's payload name differently.
         wire["invoice"]["by"] = json!({"new": "shape"});
@@ -966,24 +1039,28 @@ mod tests {
         assert_eq!(serde_json::to_value(decoded).expect("json"), wire);
     }
 
-    /// The delete response's `reason` is the worker's own token or
-    /// szamlazz.hu's code, on the wire the one string it always was; a token
-    /// this version does not know remains unclassified (the response stays open).
+    /// Worker reasons and vendor answers retain separate provenance.
     #[test]
     fn delete_response_round_trips() {
         let json = round_trip(&DeleteProformaResponse::deleted());
-        assert_eq!(json, json!({"deleted": true, "reason": null}));
+        assert_eq!(
+            json,
+            json!({"outcome": "deleted", "reason": null, "code": null, "message": null})
+        );
         let json = round_trip(&DeleteProformaResponse::absent());
-        assert_eq!(json, json!({"deleted": true, "reason": "absent"}));
+        assert_eq!(
+            json,
+            json!({"outcome": "absent", "reason": null, "code": null, "message": null})
+        );
         for (reason, wire) in [
             (DeleteReason::ProformaPaid, "proforma_paid"),
             (DeleteReason::ExternalIdCollision, "external_id_collision"),
             (DeleteReason::Other("335".to_owned()), "335"),
         ] {
-            let json = round_trip(&DeleteProformaResponse::not_deleted(reason.clone()));
+            let json = round_trip(&DeleteProformaResponse::conflict(reason.clone()));
             assert_eq!(
                 json,
-                json!({"deleted": false, "reason": wire}),
+                json!({"outcome": "conflict", "reason": wire, "code": null, "message": null}),
                 "{reason:?}"
             );
             assert_eq!(reason.to_string(), wire);
@@ -1023,7 +1100,7 @@ mod tests {
         let mut invoice = DocumentStatus::new("SZ-2", DocumentState::Live);
         invoice.gross = Some(dec!(25400));
         invoice.net = Some(dec!(20000));
-        invoice.credit_entries = vec![dec!(10000)];
+        invoice.credit_entry_amounts = vec![dec!(10000)];
         invoice.referenced_proforma = Some("D-1".to_owned());
         invoice.e_invoice = Some(true);
         status.set(DocumentKind::Invoice, Some(invoice));
@@ -1043,7 +1120,7 @@ mod tests {
         let json = round_trip(&status);
         assert_eq!(json["invoice"]["number"], "SZ-2");
         assert_eq!(json["invoice"]["state"], "live");
-        assert_eq!(json["invoice"]["credit_entries"], json!(["10000"]));
+        assert_eq!(json["invoice"]["credit_entry_amounts"], json!(["10000"]));
         assert_eq!(json["proforma"]["state"], "consumed");
         assert_eq!(json["proforma"]["by"], "SZ-2");
         assert_eq!(json["final"]["state"], "reversed");

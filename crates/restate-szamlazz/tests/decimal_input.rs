@@ -170,8 +170,12 @@ fn public_money_replays_from_json_text_bytes_and_sdk() {
     let mut status = DocumentStatus::new("SZ-1", DocumentState::Live);
     status.gross = Some(amount);
     status.net = Some(amount);
-    status.credit_entries = vec![amount];
-    check(&status, &["/gross", "/net", "/credit_entries/0"], token);
+    status.credit_entry_amounts = vec![amount];
+    check(
+        &status,
+        &["/gross", "/net", "/credit_entry_amounts/0"],
+        token,
+    );
     let mut registered = SetCreditEntriesResponse::new("SZ-1");
     registered.outstanding = Some(amount);
     registered.gross_total = Some(amount);

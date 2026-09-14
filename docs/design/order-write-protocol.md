@@ -5,6 +5,13 @@ The test seams are confirmed: public Gateway, contract serialization, and real R
 
 ## Commands and permission
 
+Exclusive Order resolution and required prerequisite reads retain transient failures inside the executing run,
+without an explicit bounded run policy, under the mutation's invocation retry/pause policy. This includes
+sanitized initialization failure and document-query codes 1/55. Repair and resume the same invocation before
+arming to continue toward its first send; completed prerequisites replay their observations. Shared `get`,
+Agent calls and optional best-effort hints keep bounded policies. This lifecycle decision does not add another
+permit or retry the final guard after permission is consumed ([ADR 0018](../adr/0018-retained-order-execution-and-evidence-boundaries.md)).
+
 Every exclusive mutation validates its body/key, reads `unresolved-write`, and refuses any present value
 before the prologue or prerequisites. Missing state alone permits ordinary validation and lookup.
 Unrecognized or malformed state is blocked, never treated as missing.
@@ -83,7 +90,7 @@ external id and takes the order hint only if that id is absent. A colliding hold
 
 ## Acknowledgement identity
 
-If the expected reissue target disappears at the permitted leading query, the result is
+If the expected reissue target disappears or a different owned holder is found at the permitted leading query, the result is
 `conflict{target_changed}` with no send. The recorded result precedes marker clearance.
 An interrupted send cannot reach this branch on replay: it has no permit and reconciles
 read-only, where absence retains uncertainty.
@@ -91,6 +98,12 @@ read-only, where absence retains uncertainty.
 A protected create reply naming the expected old reissue document does not establish a replacement.
 The send is `Unconfirmed`, journaled as unresolved data; the marker remains and `reconcile-write` requires
 matching issuance evidence with a number distinct from the expected old target. No second create is sent.
+
+This evidence rule accepts the provider **newest-holder/non-regression assumption**, not a provider guarantee.
+An older historical holder can match order/kind and differ from the expected old target; the worker has no
+history discriminator to exclude it. ADR 0018 records the primary evidence, the missing failure/recovery
+experiment, the false-settlement counterexample and the operator's quiesce/investigate procedure. Do not
+infer monotonicity from a successful query or from provider record-ID/number ordering.
 
 A protected storno reply echoing the verified original's number likewise establishes neither a reversal
 nor non-execution. It retains the marker and enters read-only reconciliation, whose evidence must name
@@ -168,13 +181,17 @@ are operational configuration faults, validated after journaled resolution befor
 static resolver construction rejects them at load time. Caller overrides retain caller-fault attribution.
 Unresolved write results retain a safe diagnostic and a candidate storno number where available; retained
 read failures name both the original cause and latest reconciliation reason without copying vendor free text.
+The diagnostic retains a reported notification failure. The owner restores that warning only when deferred
+reconciliation proves the same storno candidate; a different fallback reversal inherits no warning. This is
+retained acknowledgement evidence, not notification history reconstructed by a query.
 
 An original-send rejection is handled automatically only by its owning invocation's recorded write
 result, with no earlier unresolved send. Recovery does not accept an arbitrary vendor-code string as
 proof of a rejection. Unknown evidence, stale tokens and mismatched identity refuse without clearing.
 There is no forget operation, TTL, elapsed-time clearance, or recovery send.
 
-Operator document verification uses the configured read policy for unanswered reads; answered credential
+Operator document verification's dedicated `verify-recovery` run uses the configured bounded read policy;
+its initialization failure remains terminal. This run does not use the retained prerequisite helper. Answered credential
 and vendor codes retain their structured faults and the marker. Recovery pins a three-execution
 invocation policy (10 seconds to one minute, pause on exhaustion), four-minute inactivity and three-minute
 abort timeouts, and 30-day journal and idempotency retention. Both are explicit because server 1.7.8 caps
@@ -196,6 +213,10 @@ State uses one stable key and an explicitly versioned, closed schema. Unknown ve
 invalid identity and malformed encoding fail closed. No automatic state migration or backfill infers
 absence of uncertainty. Immutable invocation routing does not isolate cross-invocation state: old code
 that ignores the marker must not overlap the protected deployment on the same scope/key.
+Recovery keeps the full exact-marker echo for now, accepting its schema coupling (ADR 0018). Clients preserve
+the observed marker as opaque JSON with exact values and integer precision; they do not rebuild a subset.
+Key ordering is irrelevant. Future state changes require an explicit version/decoder and migration decision;
+unknown versions stay inspectable and fail closed. No handle redesign is selected.
 Marker Order identity is exact: leading/trailing whitespace is rejected, even though the general
 `OrderKey` parser trims values outside the persisted-marker boundary.
 

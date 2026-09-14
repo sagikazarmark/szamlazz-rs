@@ -123,12 +123,24 @@ async fn exercise(leading: bool) {
         let call = Call::object("Szamlazz.Order", &key, "storno_invoice");
         let observe = Call::object("Szamlazz.Order", &key, "observe_unresolved");
         let body = json!({"invoice_number":"SZ-ORIGINAL"});
-        let owner = if leading {
-            let owner = restate.invoke(&call.send(), Some(&body), Some(&key)).await;
+        let owner = restate.invoke(&call.send(), Some(&body), Some(&key)).await;
+        assert_eq!(owner.status, 202, "{}", owner.body);
+        assert_eq!(
             restate
                 .admin()
-                .await_status(owner.invocation_id(), &["paused"])
-                .await;
+                .await_status(owner.invocation_id(), &["paused", "completed"])
+                .await,
+            "paused"
+        );
+        assert!(
+            restate
+                .admin()
+                .invocation(owner.invocation_id())
+                .await
+                .completion_failure
+                .is_none()
+        );
+        if leading {
             assert_eq!(
                 restate.invoke(&observe, None, None).await.body["state"],
                 "unresolved"
@@ -147,38 +159,36 @@ async fn exercise(leading: bool) {
                 ],
                 "{defect}: evidence failure after arming must reconcile"
             );
-            Some(owner)
         } else {
-            let refused = restate.invoke(&call, Some(&body), None).await;
-            assert_eq!(refused.status, 503, "{defect}: {}", refused.body);
             assert_eq!(
-                restate.admin().runs(refused.invocation_id()).await,
+                restate.admin().runs(owner.invocation_id()).await,
                 [
                     "namespace",
                     "account",
                     "verify-original-SZ-ORIGINAL",
                     "lookup-storno-SZ-ORIGINAL"
                 ],
-                "{defect}: evidence failure before arming stays a read fault"
+                "{defect}: evidence failure before arming retains its prerequisite"
             );
             assert_eq!(
                 restate.invoke(&observe, None, None).await.body["state"],
                 "absent"
             );
-            None
-        };
+        }
         // Inspect zero sends before allowing positive evidence, not just after
         // the invocation's final answer.
         mock.verify().await;
         valid.store(true, Ordering::SeqCst);
-        if let Some(owner) = owner {
-            restate.admin().resume(owner.invocation_id()).await;
-        } else {
-            original_reads.store(0, Ordering::SeqCst);
-        }
-        let completed = restate
-            .invoke(&call, Some(&body), leading.then_some(key.as_str()))
-            .await;
+        restate.admin().resume(owner.invocation_id()).await;
+        assert_eq!(
+            restate
+                .admin()
+                .await_status(owner.invocation_id(), &["completed", "paused"])
+                .await,
+            "completed"
+        );
+        let completed = restate.invoke(&call, Some(&body), Some(&key)).await;
+        assert_eq!(completed.invocation_id(), owner.invocation_id());
         assert_eq!(completed.status, 200, "{defect}: {}", completed.body);
         assert_eq!(completed.body["outcome"], "reversed", "{defect}");
         assert_eq!(completed.body["storno_number"], "SS-CANDIDATE", "{defect}");

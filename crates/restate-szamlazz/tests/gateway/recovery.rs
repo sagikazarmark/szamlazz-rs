@@ -11,6 +11,80 @@ use restate_szamlazz::gateway::{
 };
 use wiremock::ResponseTemplate;
 
+/// Specification counterexample for ADR 0018's accepted provider non-regression
+/// premise, NOT evidence that szamlazz.hu regresses. A historical A differs from
+/// expected B and passes today's positive-evidence rule. The caller's retained
+/// intent has no history with which to distinguish A from the uncertain C.
+#[tokio::test]
+async fn historical_holder_after_uncertain_reissue_exposes_the_non_regression_premise() {
+    let h = Harness::start().await;
+    let id = external_id();
+    let order = order();
+    // Synthetic settled history: A existed and was reversed, then B replaced
+    // it and was reversed. These are observations, not issuance permissions.
+    for number in ["SZ-A", "SZ-B"] {
+        external_id_query(id.as_str())
+            .respond_with(Doc::reversed(number, "SZ").response())
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        assert!(
+            matches!(h.observe_create().await, Ok(restate_szamlazz::gateway::OwnershipOutcome::Reversed(found)) if found.number == number)
+        );
+    }
+    external_id_query(id.as_str())
+        .respond_with(Doc::reversed("SZ-B", "SZ").response())
+        .up_to_n_times(2)
+        .expect(2)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    // One authorized replacement of B (potential C), with no conclusive reply;
+    // the immediate read still sees B and therefore retains uncertainty.
+    assert!(h.create(Some("SZ-B")).await.is_err());
+    h.server.verify().await;
+    h.server.reset().await;
+
+    let operation = WriteOperation::Create {
+        kind: IssuedKind::Invoice,
+        expected_number: Some("SZ-B".into()),
+        corrected_number: None,
+    };
+    // Deliberately violate newest-holder non-regression: return historical A.
+    external_id_query(id.as_str())
+        .respond_with(Doc::reversed("SZ-A", "SZ").response())
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    create()
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&h.server)
+        .await;
+    let result = h
+        .gateway
+        .reconcile(ReconciliationRequest {
+            external_id: id.as_str(),
+            order: &order,
+            operation: &operation,
+            candidate: None,
+        })
+        .await
+        .expect("synthetic answer");
+    assert!(
+        matches!(result, ReconciliationOutcome::Created(found) if found.number == "SZ-A" && !found.is_live())
+    );
+    // This acceptance would falsely settle C if the premise failed. It does
+    // not grant another permission, and reconciliation itself remains read-only.
+    assert_eq!(h.bodies().await.len(), 1);
+    h.server.verify().await;
+}
+
 #[tokio::test]
 async fn retained_corrective_intent_reconciles_without_another_send() {
     let h = Harness::start().await;

@@ -116,20 +116,26 @@ pub(crate) async fn purged_deletion_intent_cannot_delete_a_replacement(h: &Harne
     let body = json!({"expected_number": "D-INTENT-A", "force": true});
     let first = h.call(order, "delete_proforma", &body, "intent-d").await;
     assert_eq!(first.status, 200, "{}", first.body);
-    assert_eq!(first.body, json!({"deleted": true, "reason": null}));
+    assert_eq!(
+        first.body,
+        json!({"outcome": "deleted", "reason": null, "code": null, "message": null})
+    );
     h.assert_state_absent(None, order).await;
     let stored = h.call(order, "delete_proforma", &body, "intent-d").await;
     assert_eq!(stored.invocation_id(), first.invocation_id());
     assert_eq!(stored.body, first.body);
     h.admin().purge(first.invocation_id()).await;
     let absent = h.call(order, "delete_proforma", &body, "intent-d").await;
-    assert_eq!(absent.body, json!({"deleted": true, "reason": "absent"}));
+    assert_eq!(
+        absent.body,
+        json!({"outcome": "absent", "reason": null, "code": null, "message": null})
+    );
     h.admin().purge(absent.invocation_id()).await;
     state.store(2, Ordering::SeqCst);
     let delayed = h.call(order, "delete_proforma", &body, "intent-d").await;
     assert_eq!(
         delayed.body,
-        json!({"deleted": false, "reason": "target_changed"})
+        json!({"outcome": "conflict", "reason": "target_changed", "code": null, "message": null})
     );
     assert_eq!(h.delete_bodies_of("D-INTENT-A").await.len(), 1);
     assert!(h.delete_bodies_of("D-INTENT-B").await.is_empty());
@@ -364,7 +370,10 @@ pub(crate) async fn deletion_preserves_ownership_and_consumed_target_outcomes(h:
                 &order,
             )
             .await;
-        assert_eq!(reply.body, json!({"deleted": false, "reason": reason}));
+        assert_eq!(
+            reply.body,
+            json!({"outcome": "conflict", "reason": reason, "code": null, "message": null})
+        );
         h.assert_state_absent(None, &order).await;
     }
     let order = "E2E-INTENT-CONSUMED";
@@ -398,7 +407,10 @@ pub(crate) async fn deletion_preserves_ownership_and_consumed_target_outcomes(h:
             "intent-consumed",
         )
         .await;
-    assert_eq!(reply.body, json!({"deleted": true, "reason": "absent"}));
+    assert_eq!(
+        reply.body,
+        json!({"outcome": "absent", "reason": null, "code": null, "message": null})
+    );
     h.assert_state_absent(None, order).await;
 }
 

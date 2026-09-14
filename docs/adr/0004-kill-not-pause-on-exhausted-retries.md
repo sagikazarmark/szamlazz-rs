@@ -5,7 +5,12 @@ amended by #22 (the create step under a run retry policy), #30 (the storno step)
 (the `Szamlazz.Agent` writes' timeouts and retry interval), #61 (the ≥ 90 s re-check rule in code), #87 (what
 an invocation attempt is spent on; `Szamlazz.Agent.storno` on `Order`'s policy; the read policy widened) and #114
 (every wait has a bound), below.
-**Current implementation (#216 and release hardening):** protected Order mutations retain read-only
+**Current implementation (#216 and release hardening, amended by [ADR 0018](0018-retained-order-execution-and-evidence-boundaries.md)):** exclusive Order
+account resolution and required prerequisite reads have no bounded run policy. Transient failures, including
+sanitized credential initialization and document-query codes 1/55, spend the invocation retry/pause policy
+inside the run; no terminal prerequisite exhaustion is journaled. Resume the same invocation after repair.
+Shared/Agent calls, optional best-effort hints and the dedicated operator `verify-recovery` retain bounded
+policies. Protected Order mutations retain read-only
 reconciliation and **pause** on invocation exhaustion. A pre-send unresolved-write marker survives cancellation
 and kill and blocks later mutations until conclusive settlement. `recover` also pauses; ordinary read handlers
 and unkeyed Agent writes retain **kill**. Query-first absence alone never settles a potentially effective write.

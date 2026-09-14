@@ -19,6 +19,14 @@ from wherever the caller keeps secrets and never written into Restate.
 
 ## Decision
 
+**Lifecycle amendment (2026-09-14, [ADR 0018](0018-retained-order-execution-and-evidence-boundaries.md)):**
+exclusive Order resolution and required prerequisite reads now use invocation retry/pause without a bounded
+run policy. Sanitized credential/Gateway initialization failures stay retryable inside those executing runs;
+they do not record a terminal prerequisite completion. Shared/Agent resolution/operations and best-effort
+optional hints keep their bounded/terminal behavior. Protected write initialization retains uncertainty after
+permission consumption. This supersedes blanket terminal-fetch and bounded-resolution descriptions below;
+account pinning, lazy credential acquisition, deadlines and scope routing retain their existing meanings.
+
 One deployment serves any number of szamlazz.hu accounts. The caller selects the account per request with
 the **Restate scope** (`/restate/scope/{scope}/call/Szamlazz.Order/{order}/…`, likewise for
 `Szamlazz.Agent`). Every handler of both services runs the same **prologue** before its operation: pin the

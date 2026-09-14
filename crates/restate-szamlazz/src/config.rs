@@ -17,7 +17,7 @@
 //! max_delay = "10m"
 //! max_duration = "1h"
 //!
-//! [read]                        # ordinary reads and operator document verification
+//! [read]                        # shared/Agent reads, operator verification, best-effort hints
 //! max_attempts = 5
 //! initial_delay = "5s"
 //! factor = 2.0
@@ -28,16 +28,30 @@
 //! max_attempts = 1              # no deliberate retry; not a crash-proof wire cap
 //!                              # omit the table to inherit the configured [read]
 //!
-//! [resolve]                     # the run retry policy of the `account` step
-//! initial_delay = "1s"         # no max_attempts: the duration is the bound
+//! [resolve]                     # shared/Agent account resolution
+//! initial_delay = "1s"          # no max_attempts: duration is the exhaustion threshold
 //! factor = 2.0
 //! max_delay = "10s"
 //! max_duration = "1m"
 //! ```
 //!
-//! Protected Order writes use one acknowledged send permit. Their read-only
-//! reconciliation uses the handler invocation policy (pause on exhaustion),
-//! configured through SDK handler options, not these run policies.
+//! Exclusive Order account resolution and required prerequisite reads omit a
+//! bounded run policy and use handler invocation retry/pause, configured through
+//! SDK handler options. Unanswered document reads include transport/parse failures,
+//! reported unavailability and codes 1/55. Sanitized credential initialization
+//! failure stays retryable inside a retained prerequisite run after its local
+//! fetch retries end. Unknown vendor codes remain journaled answers, and
+//! prerequisite credential rejection currently completes with a terminal fault.
+//! Shared/Agent ordinary reads and resolution use the bounded policies below;
+//! best-effort hints remain bounded even within Order. Dedicated operator
+//! `verify-recovery` also uses the bounded read policy.
+//!
+//! Protected Order writes consume one acknowledged send permit and retain
+//! read-only reconciliation under invocation retry/pause. A failure after arming
+//! can conservatively retain a marker even when initialization or a pre-send read
+//! prevented sending. Resume does not regrant permission or treat absence as
+//! settlement. Before arming, repair-and-resume of the same invocation can
+//! continue prerequisites toward its first send. Retry thresholds are not wire caps.
 //!
 //! The types implement `Deserialize` only and are **closed**
 //! (`#[serde(deny_unknown_fields)]`): a misspelt table or key is a parse
@@ -74,9 +88,11 @@ use table::Table;
 /// The namespace prefixes every external id the deployment issues; the issue
 /// policy is the run retry policy of `Szamlazz.Agent.storno`; protected Order
 /// writes send at most once and reconcile under their handler invocation policy.
-/// The read policy governs ordinary reads and operator document verification;
-/// retained Order reconciliation uses the invocation policy instead. The resolve policy
-/// is the run retry policy of the `account` step. The optional query policy
+/// Exclusive Order account resolution, required prerequisite reads and retained
+/// reconciliation use invocation retry/pause without a bounded run policy. The read
+/// policy governs shared/Agent ordinary reads, operator document verification and
+/// best-effort hints, including hints within Order. The resolve policy governs
+/// shared/Agent `account` steps. The optional query policy
 /// overrides the read policy for explicit document queries alone. Absent query
 /// configuration inherits the configured read policy; the other policies default
 /// when absent. [`validate`](Self::validate) checks the cross-field
@@ -90,8 +106,9 @@ pub struct WorkerConfig {
     /// The run retry policy of `Szamlazz.Agent.storno`, not protected Order writes.
     #[serde(default)]
     pub issue: IssueConfig,
-    /// Ordinary read and recovery-verification run policy; retained Order
-    /// reconciliation uses the handler's invocation policy instead.
+    /// Bounded policy for shared/Agent ordinary reads, dedicated operator
+    /// verification and best-effort hints (including within Order). Exclusive
+    /// Order required prerequisites and reconciliation use invocation retry/pause.
     #[serde(default)]
     pub read: ReadConfig,
     /// Explicit `Szamlazz.Agent.query` override. `None` inherits [`Self::read`],
@@ -99,7 +116,8 @@ pub struct WorkerConfig {
     /// defaults for omitted fields, not a field-by-field merge with `read`.
     #[serde(default)]
     pub query: Option<QueryConfig>,
-    /// The resolve policy: the run retry policy of the `account` step.
+    /// Bounded policy for shared/Agent `account` steps. Exclusive Order account
+    /// resolution uses invocation retry/pause without a bounded run policy.
     #[serde(default)]
     pub resolve: ResolveConfig,
 }
@@ -302,8 +320,8 @@ pub mod table {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub enum Issue {}
 
-    /// `[read]`: ordinary reads and operator document verification. Defaults:
-    /// five executions, `5s → 60s` doubling, bounded at `5m`.
+    /// `[read]`: shared/Agent reads, operator verification and best-effort hints.
+    /// Defaults: five executions, `5s → 60s` doubling, duration threshold `5m`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub enum Read {}
 
@@ -312,8 +330,9 @@ pub mod table {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub enum Query {}
 
-    /// `[resolve]`: the run retry policy of the `account` step. Defaults:
-    /// no attempt cap, `1s → 10s` doubling, bounded at `1m`.
+    /// `[resolve]`: shared/Agent account resolution. Exclusive Order uses
+    /// invocation retry/pause. Defaults: no attempt cap, `1s → 10s` doubling,
+    /// duration threshold `1m`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub enum Resolve {}
 
@@ -392,30 +411,34 @@ pub mod table {
 /// which [`WorkerConfig::validate`] enforces.
 pub type IssueConfig = RetryPolicyConfig<table::Issue>;
 
-/// The read policy: the run retry policy of ordinary read-only durable steps of
-/// both services (the lookup step and the exclusivity, proforma-link and
-/// `get` lookups, the verifies, the order-number hint, the storno lookup,
-/// `Szamlazz.Agent.query` unless overridden, and the `check_account` probe). A read that
-/// szamlazz.hu did not answer (a transport or parse failure, `szlahu_down`)
-/// is the step's retryable error, re-executed after `initial_delay`, the
-/// delay multiplied by `factor` up to `max_delay`, until `max_attempts`
-/// executions or `max_duration` is reached on failure (subject to the
-/// overshoot caveats on [`RetryPolicyConfig`]); the handler reports
-/// `unavailable`. Every szamlazz.hu *answer* is data and never retried. The
-/// policy shapes no journal entry. Operator document verification also uses it;
-/// retained Order reconciliation instead spends the handler invocation policy.
+/// The bounded run retry policy for shared `get`, Agent ordinary reads and
+/// dedicated operator `verify-recovery`. `Szamlazz.Agent.query` inherits it unless
+/// overridden by [`QueryConfig`]. Best-effort optional hints also use it, even
+/// within exclusive Order handlers; exhaustion omits their detail, while
+/// cancellation propagates. Other bounded read exhaustion reports `unavailable`.
 ///
-/// A read may be retried freely: it writes nothing, and a re-executed
-/// closure's answer is exactly as fresh as a first answer. The defaults are
-/// sized for szamlazz.hu, not for the worker: five executions 5 → 10 → 20 →
-/// 40 s apart ride out a blip of about a minute, and, since szamlazz.hu is
-/// observed to stall for a minute at a time, a stalling szamlazz.hu is waited
-/// out with a 5 m exhaustion threshold, instead of immediately failing with a terminal
-/// `unavailable` that is stored under the caller's `Idempotency-Key` for the
-/// retention period. This policy, not the handlers' invocation retry policy,
-/// is what decides how long a szamlazz.hu outage is tolerated: a run retry is
-/// re-dispatched by the server without spending an invocation attempt. A
-/// worker outage is the invocation retry policy's business.
+/// Unanswered document reads include transport/parse failures, `szlahu_down` and
+/// codes 1/55, classified before journaling an answer. The account probe also
+/// treats other non-credential codes as unanswered: only a miss or valid document
+/// establishes credential acceptance. Ordinary document queries preserve other
+/// vendor codes, including unknown codes, as journaled answers; credential
+/// rejection currently becomes a terminal prerequisite fault. Taxpayer code
+/// answers retain their separate pass-through contract.
+///
+/// Exclusive Order required prerequisites (ownership, exclusivity, proforma-link
+/// and other required verifies/lookups) instead use invocation retry/pause without
+/// a bounded run policy, as does automatic read-only reconciliation. Sanitized
+/// initialization failure stays retryable inside those prerequisite runs even
+/// after local credential retries end. Bounded read initialization retains its
+/// terminal treatment; optional hints omit the detail on initialization failure.
+///
+/// Defaults are five executions, with delays of 5, 10, 20 and 40 seconds and a
+/// five-minute duration threshold. See [`RetryPolicyConfig`] for overshoot:
+/// thresholds are neither deadlines nor durable wire-request caps. A failed run
+/// under this explicit policy is re-dispatched without spending an invocation
+/// attempt. Re-executed reads obtain new observations; completed reads replay
+/// their recorded facts. Retain operator intervention rather than retrying until
+/// success. The policy shapes no journal entry.
 pub type ReadConfig = RetryPolicyConfig<table::Read>;
 
 /// The optional run retry policy of `Szamlazz.Agent.query` alone. A present
@@ -430,8 +453,8 @@ pub type ReadConfig = RetryPolicyConfig<table::Read>;
 /// A fresh observation requires a fresh invocation rather than a retained key.
 pub type QueryConfig = RetryPolicyConfig<table::Query>;
 
-/// The resolve policy: the run retry policy of the `account` step of every
-/// handler, which asks the account resolver for the request's account. An
+/// The bounded resolve policy for shared/Agent `account` steps, which ask the
+/// account resolver for the request's account. An
 /// unavailable resolver is retried under it (`initial_delay` growing by
 /// `factor` to `max_delay`, with `max_duration` as an exhaustion threshold;
 /// see [`RetryPolicyConfig`] for overshoot, and no attempt cap is set by
@@ -439,9 +462,10 @@ pub type QueryConfig = RetryPolicyConfig<table::Query>;
 /// unknown are answers, journaled as data, never retried. Shapes no journal
 /// entry.
 ///
-/// Set explicitly for the same reason as the issue policy: the SDK's default
-/// run policy sends no retry delay and the server would spend the handler's
-/// `invocation_retry_policy` instead.
+/// Exclusive Order account resolution deliberately omits this bounded run policy
+/// and spends the handler's invocation retry/pause policy instead. Repair and
+/// resume the same retained invocation; completed account resolution replays its
+/// pinned account. Each resolver call has a separate ten-second deadline.
 pub type ResolveConfig = RetryPolicyConfig<table::Resolve>;
 
 /// A run retry policy as one table of the [`WorkerConfig`] configures it:

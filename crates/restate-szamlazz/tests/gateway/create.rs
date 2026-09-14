@@ -310,7 +310,7 @@ async fn create_with_a_lost_reply_whose_re_query_finds_the_document_reversed_is_
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
-    reason = "one table: twelve rows, one gateway each"
+    reason = "one table of leading-query outcomes, one gateway each"
 )]
 async fn the_create_steps_leading_query_settles_or_proceeds() {
     let other_order = Doc {
@@ -319,7 +319,7 @@ async fn the_create_steps_leading_query_settles_or_proceeds() {
     };
     // (what the leading query answers, what the lookup saw reversed, creates
     // sent, the outcome)
-    let rows: [(&str, ResponseTemplate, Option<&str>, u64, &str); 12] = [
+    let rows: [(&str, ResponseTemplate, Option<&str>, u64, &str); 14] = [
         ("a clean miss sends", not_found(), None, 1, "Issued SZ-2"),
         (
             "a live document is an earlier execution's",
@@ -333,7 +333,7 @@ async fn the_create_steps_leading_query_settles_or_proceeds() {
             Doc::new("SZ-1", "SZ").response(),
             Some("SZ-0"),
             0,
-            "Found SZ-1",
+            "TargetChanged",
         ),
         (
             "the lookup's reversed document, still reversed, sends",
@@ -354,7 +354,7 @@ async fn the_create_steps_leading_query_settles_or_proceeds() {
             Doc::reversed("SZ-1", "SZ").response(),
             Some("SZ-0"),
             0,
-            "Reversed SZ-1",
+            "TargetChanged",
         ),
         (
             "the lookup's reversed document reported live",
@@ -383,6 +383,20 @@ async fn the_create_steps_leading_query_settles_or_proceeds() {
             None,
             0,
             "Unavailable query: szlahu_down",
+        ),
+        (
+            "maintenance code is answered data before sending",
+            body_error("1", "maintenance"),
+            None,
+            0,
+            "Api 1",
+        ),
+        (
+            "signing code is answered data before sending",
+            body_error("55", "signing"),
+            None,
+            0,
+            "Api 55",
         ),
         (
             "a credential code never sends",
@@ -428,6 +442,7 @@ async fn the_create_steps_leading_query_settles_or_proceeds() {
 /// this line.
 fn describe_create(outcome: &Result<CreateOutcome, Unconfirmed>) -> String {
     match outcome {
+        Ok(CreateOutcome::TargetChanged) => "TargetChanged".to_owned(),
         Ok(CreateOutcome::Issued(issued)) => format!("Issued {}", issued.number),
         Ok(CreateOutcome::Found(found)) => format!("Found {}", found.number),
         Ok(CreateOutcome::Reversed(found)) => format!("Reversed {}", found.number),

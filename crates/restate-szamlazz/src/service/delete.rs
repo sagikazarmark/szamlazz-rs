@@ -43,7 +43,7 @@ impl Execution {
                 if let OwnershipOutcome::Live(doc) | OwnershipOutcome::Reversed(doc) = &found
                     && doc.number != request.expected_number.as_str()
                 {
-                    return Ok(DeleteProformaResponse::not_deleted(
+                    return Ok(DeleteProformaResponse::conflict(
                         DeleteReason::TargetChanged,
                     ));
                 }
@@ -106,7 +106,7 @@ fn named_delete_guard(
 ) -> Result<ControlFlow<DeleteProformaResponse, Box<FoundDocument>>, Fault> {
     match found {
         QueryOutcome::Found(found) if !found.is_ours(order, IssuedKind::Proforma) => {
-            Ok(ControlFlow::Break(DeleteProformaResponse::not_deleted(
+            Ok(ControlFlow::Break(DeleteProformaResponse::conflict(
                 DeleteReason::TargetChanged,
             )))
         }
@@ -144,7 +144,7 @@ fn delete_guard(
             return Ok(ControlFlow::Break(DeleteProformaResponse::absent()));
         }
         OwnershipOutcome::Collision(_) => {
-            return Ok(ControlFlow::Break(DeleteProformaResponse::not_deleted(
+            return Ok(ControlFlow::Break(DeleteProformaResponse::conflict(
                 DeleteReason::ExternalIdCollision,
             )));
         }
@@ -164,9 +164,7 @@ fn paid_guard(
     force: bool,
 ) -> ControlFlow<DeleteProformaResponse, Box<FoundDocument>> {
     if !found.credit_entries.is_empty() && !force {
-        return ControlFlow::Break(DeleteProformaResponse::not_deleted(
-            DeleteReason::ProformaPaid,
-        ));
+        return ControlFlow::Break(DeleteProformaResponse::conflict(DeleteReason::ProformaPaid));
     }
     ControlFlow::Continue(found)
 }
@@ -180,9 +178,8 @@ fn delete_unknown(lost: &impl std::fmt::Display) -> Fault {
     ))
 }
 
-/// The settled delete step as the response: deleted, and gone since the
-/// lookup (335), are both `deleted`; szamlazz.hu refusing is `not_deleted`
-/// with its code as the reason. Fresh guards can stop a paid/changed target.
+/// The settled delete step distinguishes deletion from reported absence (335),
+/// worker conflicts and vendor rejections. Fresh guards can stop a paid/changed target.
 ///
 /// # Errors
 ///
@@ -195,18 +192,16 @@ fn delete_response(
     namespace: &Namespace,
 ) -> Result<DeleteProformaResponse, Fault> {
     match outcome {
-        DeleteOutcome::Deleted | DeleteOutcome::AlreadyGone => {
-            Ok(DeleteProformaResponse::deleted())
-        }
-        DeleteOutcome::Rejected(rejection) => {
-            Ok(DeleteProformaResponse::not_deleted(rejection.code.into()))
-        }
-        DeleteOutcome::TargetChanged => Ok(DeleteProformaResponse::not_deleted(
+        DeleteOutcome::Deleted => Ok(DeleteProformaResponse::deleted()),
+        DeleteOutcome::AlreadyGone => Ok(DeleteProformaResponse::absent()),
+        DeleteOutcome::Rejected(rejection) => match rejection.code {
+            crate::gateway::RejectionCode::Request => Err(Fault::invalid_input(rejection.message)),
+            code => Ok(DeleteProformaResponse::rejected(code, rejection.message)),
+        },
+        DeleteOutcome::TargetChanged => Ok(DeleteProformaResponse::conflict(
             DeleteReason::TargetChanged,
         )),
-        DeleteOutcome::Paid => Ok(DeleteProformaResponse::not_deleted(
-            DeleteReason::ProformaPaid,
-        )),
+        DeleteOutcome::Paid => Ok(DeleteProformaResponse::conflict(DeleteReason::ProformaPaid)),
         DeleteOutcome::Api(answer) => Err(AnsweredCode::Inconclusive(answer).into_fault(namespace)),
         DeleteOutcome::GuardFailed(cause) => Err(Fault::unavailable(format!(
             "could not refresh the pinned proforma before deletion: {cause}; the outcome is not known; {DELETE_RECOVERY}"
@@ -241,10 +236,10 @@ mod tests {
     }
 
     /// The guard before the delete step: nothing under the proforma's
-    /// external id is `deleted{reason: absent}` (deleted earlier or consumed;
+    /// external id is `absent` (deleted earlier or consumed;
     /// `get` tells which); another document under it is
-    /// `not_deleted{external_id_collision}`, never touched, `force` or not; a
-    /// proforma with a credit entry is `not_deleted{proforma_paid}` without
+    /// `conflict{external_id_collision}`, never touched, `force` or not; a
+    /// proforma with a credit entry is `conflict{proforma_paid}` without
     /// `force` (szamlazz.hu has no such guard) and the one to delete with it;
     /// an unpaid one is the one to delete, whether szamlazz.hu reports it
     /// live or reversed (a proforma of ours is a proforma of ours). An
@@ -281,7 +276,7 @@ mod tests {
             );
             assert_eq!(
                 guard(OwnershipOutcome::Collision(other.boxed()), force).expect("data"),
-                ControlFlow::Break(DeleteProformaResponse::not_deleted(
+                ControlFlow::Break(DeleteProformaResponse::conflict(
                     DeleteReason::ExternalIdCollision
                 )),
                 "force {force}"
@@ -294,9 +289,7 @@ mod tests {
         }
         assert_eq!(
             guard(OwnershipOutcome::Live(paid.boxed()), false).expect("data"),
-            ControlFlow::Break(DeleteProformaResponse::not_deleted(
-                DeleteReason::ProformaPaid
-            ))
+            ControlFlow::Break(DeleteProformaResponse::conflict(DeleteReason::ProformaPaid))
         );
         assert_eq!(
             guard(OwnershipOutcome::Live(paid.boxed()), true).expect("data"),
@@ -324,9 +317,8 @@ mod tests {
         assert_eq!(body["code"], "credentials_rejected", "{body}");
     }
 
-    /// The settled delete step as the response: deleted, and gone since the
-    /// lookup (335), are both `deleted`; szamlazz.hu refusing is
-    /// `not_deleted` with its code as the reason; rejected credentials are
+    /// The settled delete step distinguishes deletion, absence and vendor
+    /// rejection, preserving the answer; rejected credentials are
     /// the `credentials_rejected` fault, a lost reply the `outcome_unknown`
     /// one naming the failure and the next step.
     #[test]
@@ -339,7 +331,7 @@ mod tests {
         );
         assert_eq!(
             delete_response(DeleteOutcome::AlreadyGone, &namespace).expect("data"),
-            DeleteProformaResponse::deleted()
+            DeleteProformaResponse::absent()
         );
         assert_eq!(
             delete_response(
@@ -347,7 +339,7 @@ mod tests {
                 &namespace,
             )
             .expect("data"),
-            DeleteProformaResponse::not_deleted(DeleteReason::Other("57".to_owned()))
+            DeleteProformaResponse::rejected("57", "Hibás XML.")
         );
 
         let (status, body) = fault_body(

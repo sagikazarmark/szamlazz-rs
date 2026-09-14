@@ -4,6 +4,52 @@ use restate_szamlazz::contract::{CreateOptions, DeleteProformaRequest};
 use serde_json::json;
 
 #[test]
+fn deletion_outcomes_distinguish_absence_worker_conflict_and_vendor_refusal() {
+    use restate_szamlazz::contract::{DeleteProformaOutcome, DeleteProformaResponse, DeleteReason};
+
+    for (response, outcome, reason, code, message) in [
+        (
+            DeleteProformaResponse::deleted(),
+            "deleted",
+            None,
+            None,
+            None,
+        ),
+        (DeleteProformaResponse::absent(), "absent", None, None, None),
+        (
+            DeleteProformaResponse::conflict(DeleteReason::TargetChanged),
+            "conflict",
+            Some("target_changed"),
+            None,
+            None,
+        ),
+        (
+            DeleteProformaResponse::rejected("57", "Hibás XML."),
+            "rejected",
+            None,
+            Some("57"),
+            Some("Hibás XML."),
+        ),
+    ] {
+        let wire = serde_json::to_value(&response).expect("encode");
+        assert_eq!(
+            wire,
+            json!({"outcome": outcome, "reason": reason, "code": code, "message": message})
+        );
+        assert_eq!(
+            serde_json::from_value::<DeleteProformaResponse>(wire).expect("decode"),
+            response
+        );
+    }
+    let response: DeleteProformaResponse =
+        serde_json::from_value(json!({"outcome": "future_deletion"})).expect("open outcome");
+    assert_eq!(
+        response.outcome,
+        DeleteProformaOutcome::Other("future_deletion".into())
+    );
+}
+
+#[test]
 fn named_target_deletion_is_explicit_and_namespace_owned_remains_the_default() {
     use restate_szamlazz::contract::DeleteMode;
 

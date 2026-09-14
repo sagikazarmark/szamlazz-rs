@@ -1,9 +1,14 @@
 //! Parsed responses must establish document identity before settling a write.
 use super::*;
 use crate::common::storno_of_number;
+use restate_szamlazz::contract::{Fault, TerminalCode};
 
 #[tokio::test]
 #[ignore = "needs RESTATE_SERVER_BIN; request validation and storno identity"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "invalid selectors and wrong originals across bounded Agent and retained Order reads"
+)]
 async fn e2e_document_identity_refuses_invalid_selectors_and_wrong_originals() {
     let Some(launcher) = launcher_or_skip(ReusePolicy::Never) else {
         return;
@@ -18,8 +23,19 @@ async fn e2e_document_identity_refuses_invalid_selectors_and_wrong_originals() {
     let mut config = WorkerConfig::new("acct".parse().expect("namespace"));
     config.read.max_attempts = Some(1);
     let (order, agent) = services_with_config(&mock.uri(), config.validate().expect("config"));
+    let options = restate_sdk::endpoint::ServiceOptions::default().handler(
+        "storno_invoice",
+        restate_sdk::endpoint::HandlerOptions::default()
+            .retry_policy_max_attempts(1)
+            .retry_policy_pause_on_max_attempts(),
+    );
     restate
-        .deploy(Endpoint::builder().bind(order).bind(agent).build())
+        .deploy(
+            Endpoint::builder()
+                .bind(order.into_service_definition().options(options))
+                .bind(agent)
+                .build(),
+        )
         .await;
     for selector in [
         json!({"external_id":"bad\u{0}id"}),
@@ -72,10 +88,38 @@ async fn e2e_document_identity_refuses_invalid_selectors_and_wrong_originals() {
         } else {
             Call::service("Szamlazz.Agent", "storno")
         };
-        let refused = restate
-            .invoke(&call, Some(&json!({"invoice_number":number})), None)
-            .await;
-        assert_eq!(refused.status, 503, "{}", refused.body);
+        let body = json!({"invoice_number":number});
+        let refused = if managed {
+            let owner = restate
+                .invoke(&call.send(), Some(&body), Some(number))
+                .await;
+            assert_eq!(owner.status, 202, "{}", owner.body);
+            assert_eq!(
+                restate
+                    .admin()
+                    .await_status(owner.invocation_id(), &["paused", "completed"])
+                    .await,
+                "paused"
+            );
+            assert!(
+                restate
+                    .admin()
+                    .invocation(owner.invocation_id())
+                    .await
+                    .completion_failure
+                    .is_none()
+            );
+            mock.verify().await;
+            restate.admin().cancel(owner.invocation_id()).await;
+            let cancelled = restate.invoke(&call, Some(&body), Some(number)).await;
+            assert_eq!(cancelled.invocation_id(), owner.invocation_id());
+            assert_eq!(cancelled.fault::<Fault>().code, TerminalCode::Cancelled);
+            cancelled
+        } else {
+            let refused = restate.invoke(&call, Some(&body), None).await;
+            assert_eq!(refused.status, 503, "{}", refused.body);
+            refused
+        };
         assert!(
             !restate
                 .admin()

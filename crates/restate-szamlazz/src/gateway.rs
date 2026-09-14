@@ -401,10 +401,8 @@ pub struct CreateStepRequest<'a> {
     create: &'a CreateInvoice,
     /// The number of the reversed document the lookup step saw under the
     /// external id (a reissue). It is the one holder the step may send past;
-    /// a live document that is not this one was issued by an earlier
-    /// execution of the step, and a reversed document that is not this one
-    /// was reversed since the lookup. If this expected holder disappears,
-    /// the leading query answers `TargetChanged`, never authorizing a send.
+    /// if the expected holder disappears or another matching holder replaces
+    /// it, the leading query answers `TargetChanged`, never authorizing a send.
     reversed: Option<&'a str>,
     /// The independently supplied corrective base, checked against the create.
     corrected_number: Option<&'a str>,
@@ -551,7 +549,7 @@ impl CreatePermission {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum CreateOutcome {
-    /// The expected reversed holder disappeared before a send. No create is
+    /// The expected reversed holder disappeared or changed before a send. No create is
     /// authorized by this observation; it does not settle any earlier send.
     TargetChanged,
     /// szamlazz.hu issued the document (or replayed a byte-identical earlier
@@ -680,6 +678,8 @@ pub enum Unconfirmed {
     StornoVerification {
         /// The number returned by the send.
         number: String,
+        /// Reported notification failure for this exact candidate only.
+        notification_delivery_failed: bool,
         /// The identity mismatch or the failure of the by-number query.
         message: String,
     },
@@ -718,16 +718,16 @@ impl Unconfirmed {
     }
 }
 
-/// A read-only step got no answer from szamlazz.hu: the read policy
+/// A read-only step got no usable answer from szamlazz.hu: the read policy
 /// re-executes it. The error of every read fn of the gateway ([`lookup`],
 /// [`lookup_ours`], [`verify`], [`query`], [`hint`], [`lookup_storno`],
 /// [`query_taxpayer`], [`probe`]), and never of a write.
 ///
-/// Every szamlazz.hu *answer* (a document, code 7, rejected credentials,
-/// another API code) is the read's data; this is only the exchange that
-/// produced none. A read writes nothing, so re-executing it is safe and a
-/// re-executed closure's answer is exactly as fresh as a first one; its
-/// exhaustion is the handler's `unavailable` fault.
+/// Document queries classify known transient vendor codes through
+/// [`ErrorCode::is_retryable`] as unavailability before recording an outcome.
+/// Other codes remain data, except on the credential probe where an arbitrary
+/// code cannot establish acceptance. A read writes nothing, so re-executing it
+/// is safe; the caller selects its retry and exhaustion policy.
 ///
 /// The one-shot writes ([`delete_proforma`], [`set_credit_entries`]) carry the same
 /// two shapes as data, [`DeleteOutcome::Lost`] / [`SetCreditEntriesOutcome::Lost`]
@@ -753,7 +753,8 @@ pub enum Unanswered {
     /// The HTTP exchange or the response parse failed.
     #[error("transport failure: {0}")]
     Transport(String),
-    /// szamlazz.hu reported unavailability (`szlahu_down`).
+    /// szamlazz.hu reported unavailability (`szlahu_down` or a known transient
+    /// read code), or the credential probe could not establish acceptance.
     #[error("szamlazz.hu is unavailable: {0}")]
     Unavailable(String),
 }
@@ -826,18 +827,16 @@ pub enum OwnershipOutcome {
 /// What the account probe of `Szamlazz.Agent.check_account` learned from one
 /// query of the sentinel external id ([`ExternalId::for_probe`]).
 ///
-/// Credential acceptance is the only fact it establishes: szamlazz.hu answers
-/// the credential codes before it looks at the request, so any other answer
-/// (code 7 above all, since nothing the service issues carries the sentinel
-/// id) means the key works. *Which* account the key opens it cannot tell: a
+/// Credential acceptance is the only fact it establishes: the expected miss
+/// (code 7) or a valid document means the key works. Other non-credential codes
+/// are inconclusive. *Which* account the key opens it cannot tell: a
 /// not-found probe has no document to read, and no operation answers "which
 /// account am I?"; that is the operator's go-live check. An exchange that
 /// produced no answer is [`Unanswered`], never an outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ProbeOutcome {
-    /// szamlazz.hu accepted the credentials and answered the query (with code
-    /// 7, a document, or any other non-credential code).
+    /// szamlazz.hu accepted the credentials and answered with code 7 or a valid document.
     Accepted,
     /// szamlazz.hu rejected the agent credentials (3, 135, 136, 164). See
     /// [`ErrorCode::is_credential_error`].
@@ -888,6 +887,10 @@ pub(crate) enum QueryError {
     /// szamlazz.hu reported unavailability (`szlahu_down`).
     #[error("szamlazz.hu is unavailable: {0}")]
     Unavailable(String),
+    /// A known transient document-query code. Retryable on reads, but retained
+    /// as an answered code when a leading write check settles without sending.
+    #[error("query: retryable vendor code {}", .0.code)]
+    Transient(SzamlazzAnswer),
     /// The HTTP exchange or the response parse failed.
     #[error("transport failure: {0}")]
     Transport(String),
@@ -914,6 +917,10 @@ impl QueryError {
             Self::NotFound => Ok(Answer::NotFound),
             Self::CredentialsRejected(answer) => Ok(Answer::CredentialsRejected(answer)),
             Self::Api(answer) => Ok(Answer::Api(answer)),
+            Self::Transient(answer) => Err(Unanswered::Unavailable(format!(
+                "query: retryable vendor code {}",
+                answer.code
+            ))),
             Self::Unavailable(message) => Err(Unanswered::Unavailable(message)),
             Self::Transport(message) => Err(Unanswered::Transport(message)),
         }
@@ -1359,11 +1366,11 @@ impl Gateway {
     /// another send. Supplied HTTP clients must disable
     /// transport retries and redirects as specified by [`Gateway::open_with_http`].
     ///
-    /// 1. Query by external id: a validated live hit that is not
-    ///    `request.reversed` is [`CreateOutcome::Found`] (an earlier
-    ///    execution created it); a validated **reversed** hit that is not
-    ///    `request.reversed` is [`CreateOutcome::Reversed`] (issued and
-    ///    reversed since the lookup); `request.reversed` reported live is
+    /// 1. Query by external id: without reissue, a validated live hit is
+    ///    [`CreateOutcome::Found`] and a validated reversed hit is
+    ///    [`CreateOutcome::Reversed`]. With reissue, a missing expected holder
+    ///    or a different validated holder is [`CreateOutcome::TargetChanged`],
+    ///    regardless of its reversal state. The expected holder reported live is
     ///    [`CreateOutcome::LiveAgain`]; an invalid hit is
     ///    [`CreateOutcome::Collision`]; code 7 without reissue and `request.reversed` still
     ///    reversed continue; rejected credentials are
@@ -1371,8 +1378,7 @@ impl Gateway {
     ///    [`CreateOutcome::Api`] and `szlahu_down` [`CreateOutcome::Unavailable`]
     ///    (answers, settled with nothing sent); only a transport failure
     ///    is [`Unconfirmed::Transport`]: never create when the check itself
-    ///    failed. A missing expected reissue holder is
-    ///    [`CreateOutcome::TargetChanged`]. The call sends only when the id
+    ///    failed. The call sends only when the id
     ///    holds nothing for an initial create, or exactly the expected reversed
     ///    document for a reissue, and consumes permission either way.
     /// 2. Send the create: success with a number is [`CreateOutcome::Issued`],
@@ -1440,7 +1446,7 @@ impl Gateway {
                 return Ok(CreateOutcome::TargetChanged);
             }
             Ok(None) | Err(QueryError::NotFound) => {}
-            Err(QueryError::Api(answer)) => {
+            Err(QueryError::Api(answer) | QueryError::Transient(answer)) => {
                 tracing::warn!(code = %answer.code, "the leading query was answered with another code");
                 return Ok(CreateOutcome::Api(answer));
             }
@@ -1677,7 +1683,15 @@ impl Gateway {
             tracing::warn!(number = %found.number, "corrective base collision");
             seen = Ok(Seen::Collision(found.clone()));
         }
-        if before_send && request.reversed.is_some() && matches!(&seen, Ok(Seen::Absent)) {
+        if before_send
+            && let Some(expected) = request.reversed
+            && match &seen {
+                Ok(Seen::Absent) => true,
+                Ok(Seen::Live(found) | Seen::Reversed(found)) => found.number != expected,
+                // Ownership/base collisions keep their stronger diagnostic.
+                _ => false,
+            }
+        {
             return Ok(Some(CreateOutcome::TargetChanged));
         }
         let settled = settle_create(seen, request.reversed);
@@ -1821,16 +1835,15 @@ impl Gateway {
 
     /// The account probe of `Szamlazz.Agent.check_account`: one query of the
     /// sentinel `external_id` ([`ExternalId::for_probe`]), whose expected
-    /// answer is code 7. Every szamlazz.hu answer but a credential code is
-    /// [`ProbeOutcome::Accepted`]: the credential codes come before anything
-    /// else, so any other code means the key was accepted; a document under
-    /// the sentinel id, which nothing the service issues carries, is logged
-    /// and accepted as well. Issues nothing.
+    /// answer is code 7. Only that miss or a valid document establishes
+    /// [`ProbeOutcome::Accepted`]. A document under the sentinel id, which
+    /// nothing the service issues carries, is logged. Issues nothing.
     ///
     /// # Errors
     ///
-    /// [`Unanswered`] when the exchange produced no answer (transport, parse,
-    /// `szlahu_down`): szamlazz.hu's verdict on the credentials is not known,
+    /// [`Unanswered`] when the exchange produced no conclusive credential evidence
+    /// (transport, parse, unavailability or another non-credential vendor code):
+    /// szamlazz.hu's verdict on the credentials is not known,
     /// and the caller's read policy re-executes the step.
     pub async fn probe(&self, external_id: &ExternalId) -> Result<ProbeOutcome, Unanswered> {
         let span = tracing::info_span!("gateway.probe", external_id = %external_id);
@@ -1849,10 +1862,9 @@ impl Gateway {
             }
             Err(error) => match error.answered()? {
                 Answer::NotFound => Ok(ProbeOutcome::Accepted),
-                Answer::Api(answer) => {
-                    tracing::debug!(code = %answer.code, "the probe was answered with a non-credential code");
-                    Ok(ProbeOutcome::Accepted)
-                }
+                Answer::Api(_) => Err(Unanswered::Unavailable(
+                    "probe: vendor answer does not establish credential acceptance".into(),
+                )),
                 Answer::CredentialsRejected(answer) => {
                     Ok(ProbeOutcome::CredentialsRejected(answer))
                 }
@@ -2005,7 +2017,7 @@ impl Gateway {
             // as `None`; the `NotFound` arm keeps the match exhaustive and is
             // right if reached.)
             Ok(None) | Err(QueryError::NotFound) => {}
-            Err(QueryError::Api(answer)) => {
+            Err(QueryError::Api(answer) | QueryError::Transient(answer)) => {
                 tracing::warn!(code = %answer.code, "the leading query was answered with another code");
                 return Ok(StornoOutcome::Api(answer));
             }
@@ -2065,6 +2077,7 @@ impl Gateway {
                         if marker.is_some() {
                             return Err(Unconfirmed::StornoVerification {
                                 number: created.invoice_number.to_string(),
+                                notification_delivery_failed: created.notification_delivery_failed,
                                 message: "storno acknowledgement names the verified original; neither reversal nor non-execution is established".to_owned(),
                             });
                         }
@@ -2090,7 +2103,11 @@ impl Gateway {
                                 issued.document_id = storno_document_id;
                                 return Ok(StornoOutcome::Reversed(issued));
                             }
-                            return Err(Unconfirmed::StornoVerification { number: created.invoice_number.to_string(), message: "numbered reply needs positive identity and original reversal evidence".to_owned() });
+                            return Err(Unconfirmed::StornoVerification {
+                                number: created.invoice_number.to_string(),
+                                notification_delivery_failed: created.notification_delivery_failed,
+                                message: "numbered reply needs positive identity and original reversal evidence".to_owned(),
+                            });
                         }
                         self.verify_storno_reply(&request, created).await
                     }
@@ -2176,6 +2193,7 @@ impl Gateway {
         };
         let unconfirmed = Unconfirmed::StornoVerification {
             number: created.invoice_number.to_string(),
+            notification_delivery_failed: created.notification_delivery_failed,
             message,
         };
         let settled = self.storno_settle_or(request, unconfirmed).await?;
@@ -2426,6 +2444,9 @@ impl Gateway {
             Err(ClientError::Api(api)) if api.code.is_credential_error() => {
                 Err(QueryError::CredentialsRejected(api.into()))
             }
+            Err(ClientError::Api(api)) if api.code.is_retryable() => {
+                Err(QueryError::Transient(api.into()))
+            }
             Err(ClientError::Api(api)) => Err(QueryError::Api(api.into())),
             Err(error) => Err(match Unanswered::from_exchange("query", &error) {
                 Unanswered::Unavailable(message) => QueryError::Unavailable(message),
@@ -2505,8 +2526,8 @@ fn is_foreign(found: &FoundDocument, our_numbers: &[String], seen: Option<&str>)
         && !our_numbers.contains(&found.number)
 }
 
-/// A raw query result as the read's outcome: every answer is data, no answer
-/// is [`Unanswered`].
+/// A raw query result as the read's outcome: conclusive answers are data;
+/// failed exchanges and known transient vendor codes are [`Unanswered`].
 fn outcome<T>(result: Result<T, QueryError>) -> Result<QueryOutcome<T>, Unanswered> {
     match result {
         Ok(document) => Ok(QueryOutcome::Found(Box::new(document))),
@@ -2518,19 +2539,17 @@ fn outcome<T>(result: Result<T, QueryError>) -> Result<QueryOutcome<T>, Unanswer
     }
 }
 
-/// The create step's rule on what its external-id query saw (`seen`),
-/// against the number of the document the lookup step saw reversed
-/// (`reversed`): the step sends only when the id holds **nothing**, or
-/// **exactly** that document, still reversed (`Ok(None)`). `Some` settles the
-/// step without a send: a live document of ours that is not `reversed`
-/// ([`CreateOutcome::Found`], an earlier execution created it), a reversed
-/// document of ours that is not `reversed` ([`CreateOutcome::Reversed`],
-/// issued and reversed since the lookup), `reversed` reported live
-/// ([`CreateOutcome::LiveAgain`], the server contradicting itself), an
-/// invalid holder ([`CreateOutcome::Collision`]) and rejected credentials
-/// ([`CreateOutcome::CredentialsRejected`]). A function of its two inputs
-/// with no other effect; the wrapper that queries logs the settlements worth
-/// noting.
+/// Classify a holder after `settled_by_query` has enforced the pre-send
+/// expected-target guard. Before sending, a missing or different matching
+/// reissue holder has already become `TargetChanged`; it never reaches this
+/// classifier. Without reissue, live/reversed holders settle as `Found`/`Reversed`.
+/// The expected holder reported live is `LiveAgain`; still reversed permits a
+/// send, as does absence for an initial create. Collisions and rejected
+/// credentials settle without sending.
+///
+/// This classifier also serves diagnostics after a conclusive duplicate refusal,
+/// where changed holders may be reported as `Found`/`Reversed`. That read neither
+/// authorizes a send nor establishes completion of an uncertain write.
 ///
 /// # Errors
 ///

@@ -1,6 +1,6 @@
 //! The prologue's `account` step under Restate, in phase 2 where a scope
 //! selects the account and the scripts are per scope: a resolver that fails
-//! then answers is re-executed under the resolve policy with one `account`
+//! then answers is re-executed under the invocation policy with one `account`
 //! entry, and an invocation standing still after its `account` step holds
 //! the order key until it is killed. The prologue's decisions (unscoped and
 //! unknown as `unknown_account`, the store's `gone` and `unavailable`, the
@@ -21,13 +21,13 @@ use crate::harness::{Harness, create_body};
 const SCOPE: &str = "beta";
 
 /// The resolver fails twice, then answers: the `account` step is re-executed
-/// under the resolve policy (one second apart under the test policy, not the
-/// handler's two-minute `initial_interval`), the invocation completes with the
+/// under the invocation policy (one second apart under the test override),
+/// the invocation completes with the
 /// outcome, `sys_invocation.retry_count` shows the run's retries with
 /// `account` as the failing command and the resolver's own message never
 /// echoed, and the journal holds one `account` entry: the failed executions
 /// journaled nothing.
-pub(crate) async fn a_flaky_resolver_is_retried_by_the_resolve_policy(h: &Harness) {
+pub(crate) async fn a_flaky_resolver_is_retried_by_the_invocation_policy(h: &Harness) {
     h.reset().await;
     h.absent("E2E-14", &["prepayment", "final", "proforma", "invoice"])
         .await;
@@ -61,7 +61,7 @@ pub(crate) async fn a_flaky_resolver_is_retried_by_the_resolve_policy(h: &Harnes
     h.assert_state_absent(Some(SCOPE), "E2E-14").await;
     assert!(
         elapsed < Duration::from_secs(60),
-        "the resolve policy's delay was honoured, not the handler's: {elapsed:?}"
+        "the test invocation policy's delay was honoured: {elapsed:?}"
     );
     assert_eq!(
         h.multi().resolutions(SCOPE) - resolutions_before,

@@ -288,7 +288,7 @@ fn defaults_and_actual_vec_arrays_still_work() {
     assert_eq!(request.options, CreateOptions::default());
     assert_eq!(request.options.proforma, ProformaLink::Auto);
     assert_eq!(request.document.overrides, DocumentOverrides::default());
-    assert!(!request.document.paid);
+    assert_eq!(request.document.paid, None);
     assert!(request.document.issue_date.is_none());
     assert!(request.document.buyer.email.is_none());
     assert!(request.document.items[0].amounts.is_none());

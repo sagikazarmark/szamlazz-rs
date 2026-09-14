@@ -54,21 +54,25 @@ async fn probe_accepts_a_document_under_the_sentinel_id() {
     assert_eq!(h.bodies().await.len(), 1);
 }
 
-/// A non-credential szamlazz.hu code on the probe still proves the key:
-/// szamlazz.hu answers the credential codes before anything else.
+/// Vendor processing order is not credential evidence. Maintenance, signing
+/// failures, other known codes and open codes all leave acceptance unestablished.
 #[tokio::test]
-async fn probe_accepts_any_other_szamlazz_code() {
-    let h = Harness::start().await;
-    external_id_query(probe_id().as_str())
-        .respond_with(api_error("57", "Rendszerhiba"))
-        .expect(1)
-        .mount(&h.server)
-        .await;
-    assert_eq!(
-        h.gateway.probe(&probe_id()).await,
-        Ok(ProbeOutcome::Accepted)
-    );
-    assert_eq!(h.bodies().await.len(), 1);
+async fn probe_does_not_accept_inconclusive_vendor_codes() {
+    for code in ["1", "55", "57", "999", "PRIVATE-UNKNOWN-CODE"] {
+        let h = Harness::start().await;
+        external_id_query(probe_id().as_str())
+            .respond_with(api_error(code, "PRIVATE-DIAGNOSTIC"))
+            .expect(1)
+            .mount(&h.server)
+            .await;
+        let result = h.gateway.probe(&probe_id()).await;
+        assert!(
+            matches!(result, Err(Unanswered::Unavailable(_))),
+            "{code}: {result:?}"
+        );
+        assert!(!format!("{result:?}").contains("PRIVATE-"));
+        assert_eq!(h.bodies().await.len(), 1);
+    }
 }
 
 /// A failed exchange (a transport failure, `szlahu_down`) settles nothing

@@ -2190,7 +2190,13 @@ mod tests {
     #[test]
     fn an_issued_document_is_issued_with_the_notification_warning_when_56_said_so() {
         let identity = invoice_identity();
-        let respond = |outcome: gateway::CreateOutcome| identity.respond_to(outcome, &namespace());
+        let respond = |outcome: gateway::CreateOutcome| {
+            identity
+                .respond_to(outcome, &namespace())
+                .inspect(|response| {
+                    response.validated().expect("complete response mapping");
+                })
+        };
 
         let issued = issued_reply(
             &[("szlahu_id", "924307747")],
@@ -2245,7 +2251,13 @@ mod tests {
         let namespace: Namespace = "acct".parse().expect("namespace");
         let order = OrderKey::parse("ORD-1").expect("order");
         let identity = Identity::of_kind(&namespace, &order, DocumentKind::Invoice);
-        let respond = |outcome: gateway::CreateOutcome| identity.respond_to(outcome, &namespace);
+        let respond = |outcome: gateway::CreateOutcome| {
+            identity
+                .respond_to(outcome, &namespace)
+                .inspect(|response| {
+                    response.validated().expect("complete response mapping");
+                })
+        };
 
         let live = Doc::default().boxed();
         let reversed = Doc {

@@ -331,7 +331,7 @@ pub(super) fn read_exhausted(step: &str, error: &TerminalError) -> Fault {
 /// The status the SDK ends a run with when the invocation was cancelled
 /// (`restate-sdk` 0.12, `endpoint/context.rs`: `TerminalFailure { code: 409,
 /// message: "cancelled" }`). A closure's own error never reaches a run's
-/// `TerminalError` with this code (`run_retrying` turns it into a retryable
+/// `TerminalError` with this code (operation errors become retryable
 /// failure and exhaustion is 500), so on a run's error the code alone tells a
 /// cancellation from an exhausted policy. The SDK exports no constant for it;
 /// the e2e's cancellation mid-send
@@ -446,6 +446,12 @@ pub(super) fn verified_document(
 /// `InvoiceNumber`, the `TaxpayerPrefix`) so the name is. The table in
 /// `tests/e2e/harness/run_names.rs` lists every name in order.
 pub(in crate::service) trait RunCtx<'ctx>: Sync {
+    /// Exclusive Order work retains transient prerequisite failures under the
+    /// invocation retry/pause policy. Shared observations and Agent calls remain
+    /// bounded by their explicit run policies.
+    fn retains_work(&self) -> bool {
+        false
+    }
     /// The scope the request arrived under, `None` when unscoped.
     fn scope(&self) -> Option<&str>;
     /// The Virtual Object key on an object context; `None` on the stateless
@@ -459,7 +465,7 @@ pub(in crate::service) trait RunCtx<'ctx>: Sync {
     fn run<T, F, Fut>(
         &self,
         name: String,
-        policy: RunRetryPolicy,
+        policy: Option<RunRetryPolicy>,
         f: F,
     ) -> BoxFuture<'ctx, Result<T, TerminalError>>
     where
@@ -469,8 +475,11 @@ pub(in crate::service) trait RunCtx<'ctx>: Sync {
 }
 
 macro_rules! run_ctx {
-    ($ctx:ident, |$this:ident| $key:expr) => {
+    ($ctx:ident, $retained:expr, |$this:ident| $key:expr) => {
         impl<'ctx> RunCtx<'ctx> for $ctx<'ctx> {
+            fn retains_work(&self) -> bool {
+                $retained
+            }
             fn scope(&self) -> Option<&str> {
                 $ctx::scope(self)
             }
@@ -487,7 +496,7 @@ macro_rules! run_ctx {
             fn run<T, F, Fut>(
                 &self,
                 name: String,
-                policy: RunRetryPolicy,
+                policy: Option<RunRetryPolicy>,
                 f: F,
             ) -> BoxFuture<'ctx, Result<T, TerminalError>>
             where
@@ -499,8 +508,12 @@ macro_rules! run_ctx {
                     super::prologue::mark_fresh_work();
                     Ok(Json(f().await?))
                 })
-                .name(name)
-                .retry_policy(policy);
+                .name(name);
+                let run = if let Some(policy) = policy {
+                    run.retry_policy(policy)
+                } else {
+                    run
+                };
                 Box::pin(async move {
                     let Json(value) = run.await?;
                     Ok(value)
@@ -510,15 +523,15 @@ macro_rules! run_ctx {
     };
 }
 
-run_ctx!(ObjectContext, |ctx| Some(ctx.key()));
-run_ctx!(SharedObjectContext, |ctx| Some(ctx.key()));
-run_ctx!(Context, |_ctx| None);
+run_ctx!(ObjectContext, true, |ctx| Some(ctx.key()));
+run_ctx!(SharedObjectContext, false, |ctx| Some(ctx.key()));
+run_ctx!(Context, false, |_ctx| None);
 
 /// Journals the result of `f` under `name` without policy-driven retries
 /// (`RunRetryPolicy::max_attempts(1)`). A crash before the result is recorded
 /// can still re-execute the closure; this is not at-most-once execution.
 /// The pure `namespace` pin returns its outcome as data.
-/// One-shot writes use [`run_retrying`] with the same threshold so their sites can
+/// One-shot writes use [`run_operating`] with the same threshold so their sites can
 /// map a run cancellation to an operation-specific fault. Reads go through
 /// [`run_reading`].
 pub(in crate::service) async fn run_once<'ctx, C, T, F, Fut>(
@@ -535,7 +548,7 @@ where
     let value = ctx
         .run(
             name.into(),
-            RunRetryPolicy::new().max_attempts(1),
+            Some(RunRetryPolicy::new().max_attempts(1)),
             || async move { Ok(f().await) },
         )
         .await
@@ -549,33 +562,6 @@ where
             }
         })?;
     Ok(value)
-}
-
-/// Journals the result of `f` under `name`, re-executing it under `policy`
-/// while it fails with `E`, the step's own "not settled" error, which the SDK
-/// treats as retryable. The whole handler replays to this entry after the
-/// policy's delay, so the closure begins again from its first line.
-///
-/// # Errors
-///
-/// The `TerminalError` the run ends with: exhaustion of the policy (500,
-/// carrying the last `E`'s message) or cancellation (409). The caller decides
-/// what it means.
-pub(in crate::service) async fn run_retrying<'ctx, C, T, E, F, Fut>(
-    ctx: &C,
-    name: impl Into<String>,
-    policy: RunRetryPolicy,
-    f: F,
-) -> Result<T, TerminalError>
-where
-    C: RunCtx<'ctx>,
-    F: FnOnce() -> Fut + Send + 'ctx,
-    Fut: Future<Output = Result<T, E>> + Send + 'ctx,
-    T: Journaled + Send + 'static,
-    E: StdError + Send + Sync + 'static,
-{
-    ctx.run(name.into(), policy, || async move { Ok(f().await?) })
-        .await
 }
 
 /// The operation boundary: initialization executes only when the SDK runs
@@ -597,7 +583,7 @@ where
     E: StdError + Send + Sync + 'static,
 {
     let gateway = exec.gateway();
-    ctx.run(name.into(), policy, move || async move {
+    ctx.run(name.into(), Some(policy), move || async move {
         let gateway = gateway.await.map_err(HandlerError::from)?;
         Ok(f(gateway).await?)
     })
@@ -618,17 +604,15 @@ pub(super) fn initialization_fault(error: &TerminalError, next: &str) -> Option<
         })
 }
 
-/// A read-only durable step under the read policy: journals the answer of
-/// `f` under `name`, re-executing it while szamlazz.hu does not answer
-/// (`Unanswered`). Every answer is data; a read writes nothing, so a
-/// re-executed closure's answer is exactly as fresh as a first one.
+/// A read-only durable step. Exclusive Order prerequisites retain unanswered
+/// reads and initialization failures under invocation retry/pause. Shared
+/// observations and Agent reads use the bounded read policy. Completed answers
+/// replay without calling the dependency again.
 ///
 /// # Errors
 ///
-/// The `unavailable` fault of a read that ended without an answer (the read
-/// policy exhausted or the invocation cancelled), naming the step and the
-/// last failure. The caller attaches the document when it knows one.
-/// Initialization failure is also `unavailable`, without spending the read policy.
+/// Cancellation is `cancelled`. Bounded exhaustion and initialization failures
+/// are `unavailable`; retained prerequisites do not complete on exhaustion.
 pub(in crate::service) async fn run_reading<'ctx, C, T, F, Fut>(
     ctx: &C,
     name: impl Into<String>,
@@ -641,6 +625,21 @@ where
     Fut: Future<Output = Result<T, Unanswered>> + Send + 'ctx,
     T: Journaled + Send + 'static,
 {
+    if ctx.retains_work() {
+        let name = name.into();
+        let gateway = exec.gateway();
+        return ctx
+            .run(name.clone(), None, move || async move {
+                // Retry the executing operation, never a journaled terminal
+                // completion. Only sanitized initialization text enters Restate.
+                let gateway = gateway
+                    .await
+                    .map_err(|fault| std::io::Error::other(fault.message))?;
+                Ok(f(gateway).await?)
+            })
+            .await
+            .map_err(|error| read_exhausted(&name, &error));
+    }
     run_reading_with_policy(ctx, name, exec.config.read.run_retry_policy(), exec, f).await
 }
 

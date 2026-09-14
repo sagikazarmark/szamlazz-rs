@@ -3,8 +3,8 @@
 
 use restate_szamlazz::contract::recovery::UnresolvedObservation;
 use restate_szamlazz::contract::{
-    CreateResponse, DocumentStatus, QueryResponse, RecordedCreditEntry, SetCreditEntriesResponse,
-    VatTotal,
+    CreateResponse, DocumentKind, DocumentStatus, OrderStatus, QueryResponse, RecordedCreditEntry,
+    SetCreditEntriesResponse, VatTotal,
 };
 use schemars::{JsonSchema, generate::SchemaSettings};
 use serde::{Serialize, de::DeserializeOwned};
@@ -18,6 +18,29 @@ fn schema<T: JsonSchema>() -> Value {
             .into_root_schema_for::<T>(),
     )
     .expect("output schema")
+}
+
+#[test]
+fn status_reports_colliding_kinds_separately_from_null_document_slots() {
+    let wire = json!({
+        "proforma": null, "invoice": null, "prepayment": null, "final": null,
+        "collisions": ["proforma", "invoice"]
+    });
+    let status: OrderStatus = serde_json::from_value(wire.clone()).expect("status");
+    assert_eq!(
+        status.collisions,
+        [DocumentKind::Proforma, DocumentKind::Invoice]
+    );
+    assert_eq!(serde_json::to_value(status).expect("encode"), wire);
+    let older: OrderStatus = serde_json::from_value(json!({})).expect("older status");
+    assert!(older.collisions.is_empty());
+    let order_schema = schema::<OrderStatus>();
+    assert_eq!(order_schema["properties"]["collisions"]["type"], "array");
+    assert!(
+        schema::<DocumentStatus>()["properties"]
+            .get("credit_entries")
+            .is_none()
+    );
 }
 
 fn money_schema(schema: &Value, optional: bool) {
@@ -95,8 +118,14 @@ fn every_response_money_field_is_a_string_or_nullable_string() {
         false,
     );
     let status = schema::<DocumentStatus>();
-    assert_eq!(status["properties"]["credit_entries"]["type"], "array");
-    money_schema(&status["properties"]["credit_entries"]["items"], false);
+    assert_eq!(
+        status["properties"]["credit_entry_amounts"]["type"],
+        "array"
+    );
+    money_schema(
+        &status["properties"]["credit_entry_amounts"]["items"],
+        false,
+    );
 
     // Nested discovery must carry the same promises as the stand-alone types.
     let query = schema::<QueryResponse>();
@@ -154,12 +183,12 @@ fn output_schema_narrowing_does_not_narrow_exact_response_decoders() {
     round_trip_money::<DocumentStatus>(json!({"number":"SZ-1", "state":"live"}), &["gross", "net"]);
 
     let status: DocumentStatus = serde_json::from_str(
-        r#"{"number":"SZ-1","state":"live","credit_entries":[9007199254740993, "1e-28"]}"#,
+        r#"{"number":"SZ-1","state":"live","credit_entry_amounts":[9007199254740993, "1e-28"]}"#,
     )
     .expect("buffered state retains exact integers and strings");
     let wire = serde_json::to_value(status).expect("status");
     assert_eq!(
-        wire["credit_entries"],
+        wire["credit_entry_amounts"],
         json!(["9007199254740993", "0.0000000000000000000000000001"])
     );
     assert_eq!(wire["gross"], Value::Null);
