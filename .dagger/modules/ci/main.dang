@@ -159,8 +159,12 @@ type Ci {
   The example owns its pinned interim SDK override; native CI keeps crates.io.
   """
   workers: String! @check {
+    let node = Dagger.container.from("node:22.22.0-bookworm-slim")
     let host = self.provisioned
-      .withExec(["sh", "-c", "apt-get update && apt-get install -y --no-install-recommends nodejs npm pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*"])
+      .withDirectory("/opt/node", node.directory("/usr/local"))
+      .withEnvVariable("PATH", "/opt/node/bin:$PATH", expand: true)
+      .withExec(["node", "-e", "if (process.versions.node !== '22.22.0') throw new Error('unexpected Node version'); console.log(process.version)"])
+      .withExec(["sh", "-c", "apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*"])
       .withExec(["rustup", "target", "add", "wasm32-unknown-unknown"])
       .withExec(["cargo", "install", "worker-build", "--version", "0.8.5", "--locked"])
       .withFile("/usr/local/bin/restate-server", self.restateServer)

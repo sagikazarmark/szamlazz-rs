@@ -11,7 +11,7 @@ and never inferred from the compilation target:
 
 | Setting | Contract | Hosting |
 |---|---|---|
-| `protected` (default) | Acknowledged execution-local send permission; interrupted or inconclusive writes reconcile read-only | Bidirectional hosting is needed for normal write progress |
+| `protected` (default) | Acknowledged execution-local send permission; before arming, resumed work may continue toward its first send; after arming, interrupted or inconclusive writes reconcile read-only | Bidirectional hosting is needed for normal write progress |
 | `replay_enabled` | An unfinished, unrecorded write may resubmit after fresh operation-specific checks; recorded uncertainty remains read-only | Native or Workers, including buffered RequestResponse |
 
 Protected execution remains supported, including correctives. Replay-enabled
