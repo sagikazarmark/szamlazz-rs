@@ -33,8 +33,8 @@ RESTATE_SERVER_BIN=/absolute/path/to/restate-server \
 ```
 
 The target is also selected by the nextest `e2e` profile used in CI. It contains
-no live provider test. Historical prototype and vendor evidence remain in
-[`../prototype_request_response`](../prototype_request_response/README.md).
+no live provider test. Historical prototype and vendor evidence are archived in
+[docs/research](../../../../docs/research/2026-09-14-request-response/README.md).
 
 The actual `Order` selects `WorkerConfig.order_execution = OrderExecution::ReplayEnabled`;
 Agent needs no selector. Existing configurations default to `Protected`. `test-util`

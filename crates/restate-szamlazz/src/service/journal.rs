@@ -180,7 +180,7 @@ fn entries() -> Vec<Entry> {
     all.extend(entries_of(vec![()], &single()));
     let mut storno = marker.clone();
     storno.execution_contract = Some(
-        crate::contract::recovery::OrdinaryExecutionContract::RequestResponseStornoV1 {
+        crate::contract::recovery::ReplayExecutionContract::RequestResponseStornoV1 {
             document_id: 123,
             fulfillment_date: jiff::civil::date(2026, 9, 3),
             e_invoice: false,
@@ -192,7 +192,7 @@ fn entries() -> Vec<Entry> {
     };
     let mut prepayment = marker.clone();
     prepayment.execution_contract =
-        Some(crate::contract::recovery::OrdinaryExecutionContract::RequestResponsePrepaymentV1);
+        Some(crate::contract::recovery::ReplayExecutionContract::RequestResponsePrepaymentV1);
     prepayment.proforma_number = Some("D-CHAIN".into());
     prepayment.operation = WriteOperation::Create {
         kind: crate::identity::IssuedKind::Prepayment,
@@ -201,7 +201,7 @@ fn entries() -> Vec<Entry> {
     };
     let mut final_invoice = marker.clone();
     final_invoice.execution_contract =
-        Some(crate::contract::recovery::OrdinaryExecutionContract::RequestResponseFinalV1);
+        Some(crate::contract::recovery::ReplayExecutionContract::RequestResponseFinalV1);
     final_invoice.prepayment_number = Some("ES-CHAIN".into());
     final_invoice.operation = WriteOperation::Create {
         kind: crate::identity::IssuedKind::Final,
@@ -210,7 +210,7 @@ fn entries() -> Vec<Entry> {
     };
     let mut proforma = marker.clone();
     proforma.execution_contract =
-        Some(crate::contract::recovery::OrdinaryExecutionContract::RequestResponseProformaV1);
+        Some(crate::contract::recovery::ReplayExecutionContract::RequestResponseProformaV1);
     proforma.operation = WriteOperation::Create {
         kind: crate::identity::IssuedKind::Proforma,
         expected_number: None,
@@ -218,7 +218,7 @@ fn entries() -> Vec<Entry> {
     };
     let mut deletion = marker.clone();
     deletion.execution_contract = Some(
-        crate::contract::recovery::OrdinaryExecutionContract::RequestResponseDeleteV1 {
+        crate::contract::recovery::ReplayExecutionContract::RequestResponseDeleteV1 {
             mode: crate::contract::DeleteMode::NamedTarget,
             force: true,
             document_id: 123,
@@ -229,12 +229,12 @@ fn entries() -> Vec<Entry> {
     };
     all.extend(entries_of(
         vec![
-            super::recovery::OrdinaryIntent::new(marker.clone()),
-            super::recovery::OrdinaryIntent::new(storno.clone()),
-            super::recovery::OrdinaryIntent::new(prepayment.clone()),
-            super::recovery::OrdinaryIntent::new(final_invoice.clone()),
-            super::recovery::OrdinaryIntent::new(proforma.clone()),
-            super::recovery::OrdinaryIntent::new(deletion.clone()),
+            super::recovery::ReplayIntent::new(marker.clone()),
+            super::recovery::ReplayIntent::new(storno.clone()),
+            super::recovery::ReplayIntent::new(prepayment.clone()),
+            super::recovery::ReplayIntent::new(final_invoice.clone()),
+            super::recovery::ReplayIntent::new(proforma.clone()),
+            super::recovery::ReplayIntent::new(deletion.clone()),
         ],
         &single(),
     ));

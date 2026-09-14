@@ -1027,7 +1027,7 @@ impl Execution {
                     our_numbers: &our_numbers,
                 };
                 if replay_enabled {
-                    return gateway.lookup_initial_ordinary(request).await;
+                    return gateway.lookup_for_replay(request).await;
                 }
                 let outcome = gateway.lookup(request).await?;
                 // References have been resolved. A newly visible corrective must
@@ -1076,7 +1076,7 @@ impl Execution {
         .map_err(|error| Fault::invalid_input(error.to_string()))?;
         if self.config.order_execution.permits_replay() {
             let result = self
-                .ordinary_request_response(ctx, order, request, &intent.identity.external_id)
+                .create_replay_enabled(ctx, order, request, &intent.identity.external_id)
                 .await?;
             return match result {
                 crate::gateway::recovery::WriteResult::Create(outcome) => Ok(outcome),

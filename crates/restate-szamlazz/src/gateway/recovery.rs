@@ -198,7 +198,7 @@ impl Gateway {
         marker: &UnresolvedWrite,
         pinned: &FoundDocument,
     ) -> WriteResult {
-        use crate::contract::recovery::OrdinaryExecutionContract as Contract;
+        use crate::contract::recovery::ReplayExecutionContract as Contract;
         let expected = Contract::RequestResponseStornoV1 {
             document_id: pinned.document_id,
             fulfillment_date: request.fulfillment_date,
@@ -296,7 +296,7 @@ impl Gateway {
         clippy::too_many_lines,
         reason = "keep fresh target, cross-kind and pinned proforma guards in send order"
     )]
-    pub(crate) async fn ordinary_request_response<F, Fut>(
+    pub(crate) async fn create_replay_enabled<F, Fut>(
         &self,
         request: super::CreateStepRequest<'_>,
         before_send: F,
@@ -471,7 +471,7 @@ impl Gateway {
             }
         }
         before_send().await;
-        ordinary_result(
+        replay_create_result(
             self.create_send_with_duplicate_evidence(&request, true, true)
                 .await,
             request.external_id.namespace(),
@@ -729,7 +729,7 @@ impl Gateway {
                     storno_number,
                     storno_document_id,
                 } => {
-                    if let Some(crate::contract::recovery::OrdinaryExecutionContract::RequestResponseStornoV1 {document_id,fulfillment_date,appearance,..})=marker.execution_contract
+                    if let Some(crate::contract::recovery::ReplayExecutionContract::RequestResponseStornoV1 {document_id,fulfillment_date,appearance,..})=marker.execution_contract
                         && let WriteOperation::Storno {number}=&marker.operation {
                         match self.verify(number).await? {
                             QueryOutcome::Found(original) if original.document_id==document_id && original.fulfillment_date==Some(fulfillment_date) && original.appearance==appearance && original.carries_order(&marker.order) && original.is_stornoable() && original.reversed==Some(true)=>{},
@@ -879,9 +879,9 @@ impl Gateway {
     }
 }
 
-/// Positive issuance alone clears under accepted ordinary replay risk. A later
+/// Positive issuance alone clears under accepted create replay risk. A later
 /// refusal/collision says nothing about an interrupted earlier execution.
-fn ordinary_result(
+fn replay_create_result(
     result: Result<CreateOutcome, super::Unconfirmed>,
     namespace: &str,
 ) -> WriteResult {

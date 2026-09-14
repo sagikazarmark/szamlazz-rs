@@ -3,7 +3,7 @@
 dir = "target/nextest"
 
 [profile.default]
-default-filter = 'not ((package(szamlazz-agent) | package(restate-szamlazz)) & (binary(=live) | binary(=probes) | binary(=prototype_request_response))) & not (package(restate-szamlazz) & (kind(lib) | binary(=e2e) | binary(=request_response)) & test(/(^|::)e2e_/) & not test(/::e2e_only_/))'
+default-filter = 'not ((package(szamlazz-agent) | package(restate-szamlazz)) & (binary(=live) | binary(=probes))) & not (package(restate-szamlazz) & (kind(lib) | binary(=e2e) | binary(=request_response)) & test(/(^|::)e2e_/) & not test(/::e2e_only_/))'
 slow-timeout = { period = "10s" }
 
 [profile.ci]

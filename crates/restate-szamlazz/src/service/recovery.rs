@@ -33,6 +33,8 @@ enum ReplayWrite {
 }
 
 impl ReplayWrite {
+    // Durable command names retain the first slice's spelling for all create kinds.
+    // Rust symbol cleanup must not silently change an invocation's journal sequence.
     const fn step(self) -> &'static str {
         match self {
             Self::Create => "ordinary",
@@ -51,14 +53,14 @@ impl ReplayWrite {
 
 /// A distinct serialized run result as well as state discriminator. Run names
 /// alone are not an exceptional-replay fence: an old prepare-write result must
-/// fail decoding rather than become ordinary resend permission.
+/// fail decoding rather than become replay send permission.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(transparent)]
-pub(super) struct OrdinaryIntent {
+pub(super) struct ReplayIntent {
     marker: UnresolvedWrite,
 }
 
-impl<'de> serde::Deserialize<'de> for OrdinaryIntent {
+impl<'de> serde::Deserialize<'de> for ReplayIntent {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         let marker = UnresolvedWrite::deserialize(de)?;
         if !valid_execution_contract(&marker) || marker.execution_contract.is_none() {
@@ -70,12 +72,11 @@ impl<'de> serde::Deserialize<'de> for OrdinaryIntent {
     }
 }
 
-impl OrdinaryIntent {
+impl ReplayIntent {
     pub(super) fn new(mut marker: UnresolvedWrite) -> Self {
         if marker.execution_contract.is_none() {
-            marker.execution_contract = Some(
-                crate::contract::recovery::OrdinaryExecutionContract::RequestResponseOrdinaryV1,
-            );
+            marker.execution_contract =
+                Some(crate::contract::recovery::ReplayExecutionContract::RequestResponseOrdinaryV1);
         }
         Self { marker }
     }
@@ -91,8 +92,8 @@ pub enum WriteCheckpoint {
     /// After acknowledged arming, before consuming permission.
     #[cfg(feature = "test-util")]
     Armed,
-    /// Experimental ordinary write: fresh target and guards passed, before send.
-    OrdinaryGuardsPassed,
+    /// Replay-enabled create: fresh target and guards passed, before send.
+    CreateGuardsPassed,
     /// After the write returns, before recording its result.
     Sent,
     /// After a positive reconciliation query, before recording it.
@@ -419,7 +420,7 @@ fn decode_marker(raw: &[u8], scope: Option<&str>, key: &str) -> Option<Unresolve
 }
 
 fn valid_execution_contract(marker: &UnresolvedWrite) -> bool {
-    use crate::contract::recovery::OrdinaryExecutionContract as Contract;
+    use crate::contract::recovery::ReplayExecutionContract as Contract;
     use crate::identity::IssuedKind;
     if marker.prepayment_number.is_some()
         && marker.execution_contract != Some(Contract::RequestResponseFinalV1)
@@ -500,7 +501,7 @@ impl Execution {
         original: &crate::gateway::FoundDocument,
     ) -> Result<WriteResult, HandlerError> {
         let contract =
-            crate::contract::recovery::OrdinaryExecutionContract::RequestResponseStornoV1 {
+            crate::contract::recovery::ReplayExecutionContract::RequestResponseStornoV1 {
                 document_id: original.document_id,
                 fulfillment_date: request.fulfillment_date,
                 e_invoice: request.e_invoice,
@@ -539,9 +540,9 @@ impl Execution {
         )
         .await
     }
-    /// Separate admission/run identity for the isolated ordinary experiment.
+    /// Replay-enabled create admission with operation-specific retained intent.
     /// Every non-positive result after the barrier retains earlier uncertainty.
-    pub(super) async fn ordinary_request_response(
+    pub(super) async fn create_replay_enabled(
         &self,
         ctx: &ObjectContext<'_>,
         order: &OrderKey,
@@ -550,17 +551,21 @@ impl Execution {
     ) -> Result<WriteResult, HandlerError> {
         let marker = UnresolvedWrite {
             execution_contract: Some(match request.operation() {
-                WriteOperation::Create {kind:crate::identity::IssuedKind::Prepayment,..} => crate::contract::recovery::OrdinaryExecutionContract::RequestResponsePrepaymentV1,
-                WriteOperation::Create {kind:crate::identity::IssuedKind::Final,..} => crate::contract::recovery::OrdinaryExecutionContract::RequestResponseFinalV1,
+                WriteOperation::Create {
+                    kind: crate::identity::IssuedKind::Prepayment,
+                    ..
+                } => {
+                    crate::contract::recovery::ReplayExecutionContract::RequestResponsePrepaymentV1
+                }
+                WriteOperation::Create {
+                    kind: crate::identity::IssuedKind::Final,
+                    ..
+                } => crate::contract::recovery::ReplayExecutionContract::RequestResponseFinalV1,
                 WriteOperation::Create {
                     kind: crate::identity::IssuedKind::Proforma,
                     ..
-                } => {
-                    crate::contract::recovery::OrdinaryExecutionContract::RequestResponseProformaV1
-                }
-                _ => {
-                    crate::contract::recovery::OrdinaryExecutionContract::RequestResponseOrdinaryV1
-                }
+                } => crate::contract::recovery::ReplayExecutionContract::RequestResponseProformaV1,
+                _ => crate::contract::recovery::ReplayExecutionContract::RequestResponseOrdinaryV1,
             }),
             proforma_number: request.proforma_number().map(str::to_owned),
             prepayment_number: request.prepayment_number().map(str::to_owned),
@@ -593,8 +598,8 @@ impl Execution {
                     );
                 }
                 gateway
-                    .ordinary_request_response(request, || {
-                        self.checkpoint(order, WriteCheckpoint::OrdinaryGuardsPassed)
+                    .create_replay_enabled(request, || {
+                        self.checkpoint(order, WriteCheckpoint::CreateGuardsPassed)
                     })
                     .await
             },
@@ -611,7 +616,7 @@ impl Execution {
         request: crate::contract::DeleteProformaRequest,
     ) -> Result<WriteResult, HandlerError> {
         let contract =
-            crate::contract::recovery::OrdinaryExecutionContract::RequestResponseDeleteV1 {
+            crate::contract::recovery::ReplayExecutionContract::RequestResponseDeleteV1 {
                 mode: request.mode,
                 force: request.force,
                 document_id: found.document_id,
@@ -687,7 +692,7 @@ impl Execution {
             .run(|| async move {
                 let mut marker = marker;
                 marker.created_at = jiff::Timestamp::now().to_string();
-                Ok(journal(OrdinaryIntent::new(marker)))
+                Ok(journal(ReplayIntent::new(marker)))
             })
             .name(format!("prepare-{step}-write"))
             .await

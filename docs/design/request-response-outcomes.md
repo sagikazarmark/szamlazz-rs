@@ -1,18 +1,17 @@
-# Experimental ordinary issuance: outcomes and marker clearance
+# Replay-enabled Order execution: outcomes and marker clearance
 
 **Current selection:** `WorkerConfig.order_execution` chooses `protected` (default)
-or `replay_enabled` on either host, without `test-util`. The experimental selection
-history below is superseded by this supported configuration. Agent has no selector;
+or `replay_enabled` on either host, without `test-util`. Agent has no selector;
 only corrective issuance is unavailable under replay-enabled Order execution.
 The per-operation outcome/clearance rules remain unchanged. See the
 [execution transition procedure](../operations/order-execution-transition.md).
 
-#247's first actual-service slice, 2026-09-14. This is the implemented experiment's
-table, pending production approval under [ADR 0019](../adr/0019-request-response-ordinary-invoice-replay.md).
+Current operation and settlement rules, accepted 2026-09-14 under
+[ADR 0019](../adr/0019-request-response-ordinary-invoice-replay.md).
 The account must have duplicate-order checking enabled, independently confirmed
 by its operator. `check_account` verifies neither that setting nor seller mapping.
 
-## Extension agreed with the user
+## Reissue, pinned proforma selection and recovery
 
 Ordinary `create_invoice` now also supports reissue and proforma conversion through
 the same native/Workers handlers. Before admission, reissue must name the exact
@@ -35,19 +34,16 @@ Success continues to mean invoice issuance, not verified proforma linkage. The
 request submits the pinned reference; queries expose the provider's reported link.
 An invoice found after conversion settles issuance even if the proforma is gone.
 
-The existing `observe_unresolved`/`recover` interface accepts legacy strict and
-known ordinary markers, preserving exact marker equality, pinned account selection,
+The existing `observe_unresolved`/`recover` interface accepts protected and all
+known replay-enabled markers, preserving exact marker equality, pinned account selection,
 record-before-clear ordering and existing evidence requirements. Unknown versions
 or execution contracts block. Recovery never grants send permission. The host
-authorizes operator access on either host. Ordinary replay-risk positive evidence
-still establishes neither uniqueness nor exclusion of delayed effects. Explicit
-experimental selection remains; other mutation sends and production migration
-remain outside this extension. This section supersedes the initial-slice exclusions
-below.
+authorizes operator access on either host. Replay-risk positive evidence
+still establishes neither uniqueness nor exclusion of delayed effects.
 
 ## Admission and support
 
-### Agent credit-entry extension
+### Agent credit entries
 
 `Szamlazz.Agent.set_credit_entries` uses its existing shared implementation on
 native and Workers. Its run journals one exchange outcome without deliberate send
@@ -61,15 +57,14 @@ There is no Order marker or worker-provided credit-entry recovery. The caller mu
 settle the exact request and exclude delayed execution before deliberate renewal,
 then query and submit only remaining entries/current intended replacement.
 
-All Agent handlers now operate identically without an experimental selector. The
-test-util `Agent::experimental_request_response` method remains a no-op compatibility
-method; Order's opt-in still selects its replay-risk contract and blocks corrective
-issuance. The same credit-entry scenarios run on native buffered RequestResponse
+All Agent handlers operate identically without an execution selector. Order's
+configuration selects its replay-risk contract and blocks corrective issuance.
+The same credit-entry scenarios run on native buffered RequestResponse
 and signed/scoped workerd, including counted additive duplicates, replacement of a
 newer external entry, exact money, lost answers, cancellation, credential/refusal
 answers and completed replay.
 
-### Storno extension (agreed)
+### Storno
 
 Order storno uses the same portable retained-write boundary. Unfinished replay
 first seeks an existing reversal, requiring both a matching storno and the freshly
@@ -93,9 +88,9 @@ no-op acknowledgement policy remain distinct. Native and Workers run these same
 services. Credit entries use the existing Agent contract above; corrective issuance
 remains outside the approved Order mutation subset.
 
-### Prepayment/final extension (agreed)
+### Prepayment and final issuance
 
-The same experimental handlers now permit prepayment and final issuance, including
+Replay-enabled handlers permit prepayment and final issuance, including
 exact-target reissue. The account's per-type duplicate-order checking is required;
 ordinary-invoice overlap observations are not evidence of atomic deduplication for
 these types. Unfinished executions may resubmit only after fresh target and chain
@@ -119,13 +114,12 @@ necessary on a final invoice; the provider does not net the reference into total
 Expected reissue numbers and pinned references never change on replay. Markers
 retain the prepayment reference separately from the proforma reference and use
 distinct execution-contract tokens. Known markers remain recoverable through the
-same exact-echo, pinned-account interface. Other mutation types and production
-migration approval remain outside this extension.
+same exact-echo, pinned-account interface.
 
-### Proforma creation and deletion extension (agreed)
+### Proforma creation and deletion
 
-The user accepts unfinished-run replay for proforma create/delete, on both hosts
-under the same explicit experimental opt-in. Creation refreshes its own holder,
+Unfinished-run replay is accepted for proforma create/delete, on both hosts
+under the same explicit execution setting. Creation refreshes its own holder,
 then ordinary/prepayment/final exclusivity and the order hint. Provider per-type
 duplicate-order checking is a prerequisite, not a proven atomic guarantee. A
 visible matching proforma settles creation; an invisible prior create may be
@@ -149,18 +143,18 @@ remain settled no-send outcomes. After recorded uncertainty, deletion cannot be
 settled by document queries: pause/resume is read-only and operator recovery needs
 audited completion or non-execution evidence for the exact marker. Kill/cancellation
 retain the marker. Known new contracts are recoverable; old or unknown prepare
-results never grant permission for the new operation. Other mutation types remain
-outside this extension.
+results never grant permission for the operation.
 
-The explicit `test-util` opt-in on Order is for an isolated
-experimental endpoint. It permits all four create handlers (proforma, ordinary,
+### Shared admission rules
+
+Replay-enabled Order execution permits all four create handlers (proforma, ordinary,
 prepayment, final), exact-target `delete_proforma`, Order `storno_invoice` and unmanaged
 Agent `storno`/`set_credit_entries`, including supported reissue
 and pinned conversion, evidence-carrying `recover`, and reads (`get`,
-`observe_unresolved`, Agent `query`, `query_taxpayer`, `check_account`). All other
-mutations return the existing `invalid_input` fault before provider I/O.
-Native constructors keep their existing behavior, including when the feature is
-compiled. Compilation target never selects financial semantics.
+`observe_unresolved`, Agent `query`, `query_taxpayer`, `check_account`). Corrective
+issuance returns the existing `invalid_input` fault before account/provider I/O.
+Omitted configuration selects protected execution. Compilation target never selects
+financial semantics; Agent operations retain their own contracts without a selector.
 
 Validation, pinned account/namespace, ownership, exclusivity, money and the full
 lookup remain ahead of admission. The open write refreshes its target first, then
@@ -169,7 +163,7 @@ already found before admission needs no marker. An observed non-namespace profor
 in the order hint blocks unless it is the explicitly selected proforma.
 These reads are sequential observations, not an atomic provider transaction.
 
-## Outcome table
+## Create outcome table
 
 “Retain” below means journal uncertainty as data, perform read-only reconciliation,
 and pause on invocation-policy exhaustion. Resume replays that uncertainty and
@@ -185,7 +179,7 @@ only repeats reconciliation. No new send is authorized by a later negative answe
 | Before admission: collision, exclusive live kind, live proforma or foreign invoice | Existing conflict; no send | Not created |
 | Marker prepared, state written, barrier not yet acknowledged | Await barrier, replay safely; no provider write before barrier | Retain if state landed |
 | Open write: fresh matching live / reversed holder | `issued` / `reversed`, positive issuance under accepted replay risk | Clear after recorded result |
-| Open write: absent holder and all fresh guards pass | Submit same ordinary intent | Retain until result recorded |
+| Open write: absent holder and all fresh guards pass | Submit same pinned create intent | Retain until result recorded |
 | Open reissue: exact old holder still reversed, all fresh guards pass | Submit same replacement intent | Retain until result recorded |
 | Open reissue: expected holder absent/live, or old-number acknowledgement | No replacement established; retain | Retain |
 | Numbered successful acknowledgement (including notification warning) | `issued`, retain optional reported metadata/warning | Clear after recorded result |
@@ -197,7 +191,7 @@ only repeats reconciliation. No new send is authorized by a later negative answe
 | Initialization or leading query failure inside open write | No send in this execution; retain earlier-write uncertainty | Retain |
 | Open execution interrupted before result is recorded | Re-execute open run with fresh target and guards; absence may lead to another submission | Retain |
 | Recorded uncertainty, including an actually never-sent/no-effect write | Read-only reconcile and pause; absence/time are not settlement | Retain |
-| Reconciliation finds matching ordinary issuance, live or since reversed | `reconciled` / `reversed` | Clear after recorded evidence |
+| Reconciliation finds matching issuance, live or since reversed | `reconciled` / `reversed` | Clear after recorded evidence |
 | Reconciliation absent, collision, failed/credential-blocked query | Retry/pause read-only | Retain |
 | Cancellation at/after barrier | `outcome_unknown`, `cause: cancelled`; no automatic renewal | Retain |
 | Kill at/after barrier | Native kill completion; successor mutation blocked | Retain |
@@ -213,20 +207,26 @@ that every possibly effective submission has finished.
 
 ## State, replay and transition boundary
 
-The experimental marker uses the same blocking state key, with a distinct
-`execution_contract: request_response_ordinary_v1` field and optional pinned
-`proforma_number`. The shared decoder accepts known legacy and ordinary markers;
-older deployments reject the extended shape. Recovery compares the original JSON
+Replay-enabled markers use the same `unresolved-write` blocking state key, with an
+operation-specific `execution_contract`. `ReplayExecutionContract` carries the stable
+`request_response_ordinary_v1`, `request_response_proforma_v1`,
+`request_response_prepayment_v1`, `request_response_final_v1`,
+`request_response_delete_v1` and `request_response_storno_v1` tokens. Creates retain
+their pinned `proforma_number` or `prepayment_number` where applicable; deletion and
+storno carry their operation-specific pinned guards. The shared decoder accepts
+known protected and replay-enabled markers; older deployments may reject extended
+shapes. Recovery compares the original JSON
 marker values, including omitted versus null members, before evidence verification.
 Observation preserves noncanonical known marker JSON as opaque content rather than
 rewriting the echo. Unknown contracts remain blocking.
-Legacy and unknown state block new admission too. The experiment never consumes a
-legacy marker as resend permission. The prepare run also records a typed result
+Protected and unknown state block new admission too. Replay-enabled execution never
+consumes a protected marker as resend permission. The prepare run records a typed result
 requiring the discriminator: an old prepare result cannot decode into the new
 contract. Distinct prepare/barrier/write step names make the changed sequence
 visible for review; names alone do not fence exceptional replay.
 
-Use a fresh isolated deployment and billing units. Preserve old immutable endpoints
-for their invocations. Do not switch existing producers or resume old journals onto
-this experiment. Production capability and transition approvals remain #247 gates;
-the experimental Workers build and signed/scoped runtime acceptance are implemented.
+Known marker recovery is independent of the selected mode; decoding compatibility
+does not authorize journal replay. Every release requires an immutable endpoint,
+with old code/config retained and invocation/state settlement before switching
+producers. Follow the [execution transition procedure](../operations/order-execution-transition.md),
+including same-mode Workers releases and invocation-specific exceptional-replay review.

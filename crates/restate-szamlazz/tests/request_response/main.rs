@@ -117,7 +117,7 @@ impl WriteObserver for Observer {
         point: WriteCheckpoint,
     ) -> restate_szamlazz::account::BoxFuture<'_, ()> {
         let hold = self.lab.change(order, |s| {
-            if point == WriteCheckpoint::OrdinaryGuardsPassed {
+            if point == WriteCheckpoint::CreateGuardsPassed {
                 s.workers.push(self.worker);
             }
             if s.hold == Some(point) {
@@ -495,7 +495,7 @@ async fn failure_case(server: &Restate, mock: &wiremock::MockServer, lab: &Arc<L
             _ => None,
         };
         s.hold = if key == "old-worker" {
-            Some(WriteCheckpoint::OrdinaryGuardsPassed)
+            Some(WriteCheckpoint::CreateGuardsPassed)
         } else if key.ends_with("crash") || key.starts_with("later-") || key.starts_with("guard-") {
             Some(WriteCheckpoint::Sent)
         } else {

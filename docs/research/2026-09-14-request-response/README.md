@@ -1,39 +1,27 @@
-# THROWAWAY: RequestResponse issuance (#247)
+# Archived RequestResponse prototype evidence (#247)
+
+Historical observations from 2026-09-14. The executable prototype, one-off vendor
+runner and illustrative walkthrough were retired after the actual-service suites
+superseded them. Their source is retained in commit `55d3c3d`, under
+`crates/restate-szamlazz/tests/prototype_request_response/`. The three JSON reports
+are preserved unchanged. This archive records evidence, not current execution rules.
+See [ADR 0019](../../adr/0019-request-response-ordinary-invoice-replay.md), the
+[native acceptance suite](../../../crates/restate-szamlazz/tests/request_response/README.md)
+and the [Workers example](../../../examples/workers/README.md) for the maintained implementation.
 
 **Question:** can narrow open-run replay provide useful RequestResponse progress,
 and what do we give up compared with the current arm/send protocol?
 
-This is an executable experiment, not an approved contract or production mode.
-No separate permission Virtual Object is used. No real credentials or provider
-account are contacted by `request_response_prototype`. The separately selected
-`vendor::vendor_overlap` **does issue test-account documents**; see
-[VENDOR.md](VENDOR.md) for its actual findings and retained cleanup work. Always
-use the exact test filter in the commands below rather than running every ignored
-test in this target. Open [walkthrough.html](walkthrough.html) for a small
-illustrative walkthrough; [observed.json](observed.json) contains runtime evidence.
-
-## Run
-
-From the repository root, with a Restate **1.7.8** binary:
-
-```sh
-RESTATE_SERVER_BIN=/absolute/path/to/restate-server \
-PROTOTYPE_REPORT_PATH="$PWD/crates/restate-szamlazz/tests/prototype_request_response/observed.json" \
-cargo test --locked -p restate-szamlazz --test prototype_request_response request_response_prototype -- --exact --ignored --nocapture
-```
-
-Omit `PROTOTYPE_REPORT_PATH` to leave the recorded evidence untouched. Use an
-absolute path: Cargo runs the binary from the package directory. The server
-gate launches fresh scratch storage and random loopback ports; the prototype
-refuses to skip when no server binary is supplied. An assertion failure fails
-the experiment. The final report is written only after successful checks and
-shutdown. The test is ignored by default and its name does not select it into
-the normal `e2e_` suite.
+The experiment used no separate permission Virtual Object. Its runtime scenarios
+contacted only a fake provider. The separately selected vendor overlap probe did
+issue test-account documents; [VENDOR.md](VENDOR.md) records its findings and
+unresolved cleanup. [observed.json](observed.json) contains the runtime report,
+written after successful checks and shutdown against fresh Restate 1.7.8 storage.
 
 The local run used the official x86_64 Linux musl release archive with its SHA-256
 verified. SDK 0.12.0, shared core 7.0.3, protocol v7, vqueues enabled.
 
-## What actually runs
+## What ran
 
 - A real Restate server and two independent SDK endpoint instances behind one
   loopback host. Successive HTTP exchanges alternate between the instances.
@@ -117,7 +105,7 @@ separately. They model inconclusive HTTP answers, not a physical TCP response lo
    risk**: one matching document does not exclude another or a delayed old send.
    The successful response and marker clearance must not claim uniqueness.
 
-## Decision boundary
+## Historical decision boundary
 
 This supports a RequestResponse-compatible narrow policy as a feasible direction,
 not a decision to ship it. It neither estimates duplicate frequency nor establishes
@@ -130,5 +118,5 @@ cross-kind transitions, storno/deletion, complete recovery authorization,
 multi-process/leader failover or deployment-changing replay. Those belong to
 implementation validation after the policy decision, not claims of this prototype.
 
-No production behavior was changed. The two added dev-dependencies serve only
-this buffered native prototype. No permanent policy enum was introduced.
+At the prototype stage no production behavior or permanent policy enum changed.
+Subsequent decisions and actual-service validation are recorded in ADR 0019.

@@ -79,11 +79,11 @@ super::object::object_input! {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct UnresolvedWrite {
-    /// Ordinary `RequestResponse` execution contract, absent on legacy protected
+    /// Operation-specific replay execution contract, absent on protected
     /// markers. Unknown tokens cannot authorize recovery or resend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution_contract: Option<OrdinaryExecutionContract>,
-    /// Pinned proforma reference submitted with ordinary issuance. Omission
+    pub execution_contract: Option<ReplayExecutionContract>,
+    /// Pinned proforma reference submitted with ordinary or prepayment issuance. Omission
     /// means no explicit link; recovery establishes issuance, not linkage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proforma_number: Option<String>,
@@ -122,11 +122,10 @@ pub struct UnresolvedWrite {
 }
 
 /// The approved replay-risk contracts; never inferred from the hosting target.
-/// The type name retains the first ordinary-invoice experiment's Rust API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub enum OrdinaryExecutionContract {
+pub enum ReplayExecutionContract {
     /// Ordinary issuance with fresh checks before unfinished-run resubmission.
     #[serde(rename = "request_response_ordinary_v1")]
     RequestResponseOrdinaryV1,
@@ -163,27 +162,27 @@ pub enum OrdinaryExecutionContract {
     },
 }
 
-impl<'de> Deserialize<'de> for OrdinaryExecutionContract {
+impl<'de> Deserialize<'de> for ReplayExecutionContract {
     fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         struct Visitor;
         impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = OrdinaryExecutionContract;
+            type Value = ReplayExecutionContract;
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str("a known execution contract")
             }
             fn visit_str<E: serde::de::Error>(self, token: &str) -> Result<Self::Value, E> {
                 match token {
                     "request_response_ordinary_v1" => {
-                        Ok(OrdinaryExecutionContract::RequestResponseOrdinaryV1)
+                        Ok(ReplayExecutionContract::RequestResponseOrdinaryV1)
                     }
                     "request_response_proforma_v1" => {
-                        Ok(OrdinaryExecutionContract::RequestResponseProformaV1)
+                        Ok(ReplayExecutionContract::RequestResponseProformaV1)
                     }
                     "request_response_prepayment_v1" => {
-                        Ok(OrdinaryExecutionContract::RequestResponsePrepaymentV1)
+                        Ok(ReplayExecutionContract::RequestResponsePrepaymentV1)
                     }
                     "request_response_final_v1" => {
-                        Ok(OrdinaryExecutionContract::RequestResponseFinalV1)
+                        Ok(ReplayExecutionContract::RequestResponseFinalV1)
                     }
                     _ => Err(E::custom("unknown execution contract")),
                 }
@@ -195,7 +194,7 @@ impl<'de> Deserialize<'de> for OrdinaryExecutionContract {
                 let result = match map.next_key::<String>()?.as_deref() {
                     Some("request_response_delete_v1") => {
                         let payload: DeleteExecution = map.next_value()?;
-                        OrdinaryExecutionContract::RequestResponseDeleteV1 {
+                        ReplayExecutionContract::RequestResponseDeleteV1 {
                             mode: payload.mode,
                             force: payload.force,
                             document_id: payload.document_id,
@@ -203,7 +202,7 @@ impl<'de> Deserialize<'de> for OrdinaryExecutionContract {
                     }
                     Some("request_response_storno_v1") => {
                         let payload: StornoExecution = map.next_value()?;
-                        OrdinaryExecutionContract::RequestResponseStornoV1 {
+                        ReplayExecutionContract::RequestResponseStornoV1 {
                             document_id: payload.document_id,
                             fulfillment_date: payload.fulfillment_date,
                             e_invoice: payload.e_invoice,

@@ -1,318 +1,162 @@
-# RequestResponse ordinary issuance with explicit replay risk
+# Explicit Order execution and RequestResponse replay risk
 
-## Production interface decision (supersedes experimental selection below)
+Accepted 2026-09-14, #247 / #249. This consolidates the initial ordinary-invoice
+experiment, its operation extensions and the production-interface decision.
 
-The user approved an explicit host-independent Order execution setting, with
-corrective issuance unavailable in replay-enabled execution. `WorkerConfig` now
-accepts `order_execution = "protected"` (default) or `"replay_enabled"`, represented
-by `config::OrderExecution`. Existing constructors and omitted config preserve the
-protected protocol. Agent has no execution selector. This is one shared service
-implementation with an explicit financial execution contract, not target-based
-semantics or an SDK protocol-mode switch.
+## Decision
 
-Replay-enabled production code supports the operation-specific rules agreed below
-without `test-util`. The Workers example selects this setting and builds without
-test utilities; only mock policies/routes remain behind the example's own
-acceptance feature. Pre-release experimental builder methods are removed rather
-than leaving a second configuration source. Test observers and unchecked config
-remain feature-gated. The corrective handler rejects replay-enabled requests with
-the existing `invalid_input` fault before account/provider operations on either host.
-No corrective duplicate-risk acceptance is implied.
+`WorkerConfig.order_execution` explicitly selects `config::OrderExecution` on
+either host. It is a financial execution setting, separate from SDK protocol mode
+and never inferred from the compilation target:
 
-This promotion preserves marker tokens and durable step sequences. It does not
-make existing journals replay-compatible across modes or releases. Use the
-[execution-mode transition procedure](../operations/order-execution-transition.md):
-new immutable endpoint, old code/config retained, all producers quiesced, old work
-settled, markers/unfinished invocations inventoried, then registration switched.
-Unknown state never grants new permission. Corrective support remains a separate
-decision; CI runs independently and is not awaited as part of this decision.
+| Setting | Contract | Hosting |
+|---|---|---|
+| `protected` (default) | Acknowledged execution-local send permission; interrupted or inconclusive writes reconcile read-only | Bidirectional hosting is needed for normal write progress |
+| `replay_enabled` | An unfinished, unrecorded write may resubmit after fresh operation-specific checks; recorded uncertainty remains read-only | Native or Workers, including buffered RequestResponse |
 
-Accepted direction 2026-09-14, following #247's runtime and vendor prototypes;
-**implemented only as an isolated `test-util` experiment, not a release-wide mutation contract**. RequestResponse is
-required. For ordinary invoice issuance, replace execution-local acknowledged
-arming with fresh-query-before-open-run-replay, relying on enabled provider
-duplicate-order checking and accepting residual duplicate risk. Retain recorded
-uncertainty and read-only recovery; do not introduce a separate permission Virtual
-Object or choose financial semantics implicitly from the compilation target.
+Protected execution remains supported, including correctives. Replay-enabled
+execution supports all four create kinds, exact-target reissue, pinned conversion
+and chain references, proforma deletion, Order storno, reads and recovery.
+Corrective issuance is refused with `invalid_input` before account/provider
+operations in replay-enabled execution: vendor overlap produced two correctives,
+and that duplicate risk has not been accepted.
 
-## Why change the decision
+Agent has no execution selector. Its existing unmanaged storno, credit-entry and
+read contracts run on either host. Execution selection needs no `test-util`;
+that feature retains unchecked test configuration and interruption observers only.
+The pre-release experimental builder methods were removed.
 
-The current Order writes its unresolved marker, executes an arm closure granting
-a volatile permit, awaits acknowledgement, then consumes that permit in the write
-run. The [real-Restate prototype](../../crates/restate-szamlazz/tests/prototype_request_response/README.md)
-showed the actual Order reaching pause with **zero sends**, without injected failure,
-under buffered RequestResponse on server 1.7.8 / Rust SDK 0.12.0 / shared core 7.0.3.
-Receiving the arm completion requires another execution; completed-arm replay does
-not grant permission. This is a progress failure, not duplicate issuance.
+The [outcome and marker-clearance table](../design/request-response-outcomes.md)
+defines operation-specific execution and settlement. The
+[transition procedure](../operations/order-execution-transition.md) defines release
+and mode changes. These are current rules; the
+[#247 implementation record](../design/request-response-issuance-brief.md) summarizes
+delivery and the [research archive](../research/2026-09-14-request-response/README.md)
+preserves the original evidence.
 
-The experimental narrow shell completed normal RequestResponse work across two
-endpoint instances. It recovered a visible first document without resending, but
-sent twice when the first document remained invisible. Recorded uncertainty stayed
-read-only, including after resume. A surviving old execution could send after its
-replacement completed. These are controlled native-host/fake-provider observations,
-not workerd or multi-process/leader-election evidence.
+## Why the replay contract exists
 
-The [vendor overlap probe](../../crates/restate-szamlazz/tests/prototype_request_response/VENDOR.md)
-then supplied operation-specific evidence:
+The protected protocol writes an unresolved marker, executes an arm closure granting
+a volatile permit, awaits acknowledgement, then consumes the permit in the write
+run. The real-Restate prototype observed the actual Order pausing with **zero
+sends**, without injected failure, under buffered RequestResponse on server 1.7.8 /
+Rust SDK 0.12.0 / shared core 7.0.3. Receiving the arm completion requires another
+execution; completed-arm replay grants no permission. This is a progress failure.
 
-- Two overlapping identical ordinary requests through independent fresh sessions
-  both returned `CTEST-2026-28`, id `930038478`.
-- Two overlapping identical corrective requests produced `CTEST-2026-31` and
-  `CTEST-2026-32`, ids `930038529` and `930038532`, both referencing `CTEST-2026-30`.
+The narrow shell progressed across two endpoint instances. It recovered a visible
+first document without resending, but sent twice while that document was invisible.
+Recorded uncertainty remained read-only after resume. A surviving old execution
+could send after its replacement completed. These were controlled native-host,
+fake-provider observations, not multi-process or leader-election evidence.
+
+The [vendor overlap findings](../research/2026-09-14-request-response/VENDOR.md)
+then established operation-specific observations:
+
+- Overlapping identical ordinary requests through independent fresh sessions both
+  returned `CTEST-2026-28`, id `930038478`.
+- Overlapping identical corrective requests produced `CTEST-2026-31` and
+  `CTEST-2026-32`, ids `930038529` and `930038532`, referencing `CTEST-2026-30`.
   Their shared external id returned only the latter.
-- Ordinary cleanup was verified. Corrective cleanup returned code 13, classified
-  as inconclusive; the three linked test documents remain for operator review.
-  The overall vendor lifecycle did not pass cleanup.
+- Ordinary cleanup was verified. Corrective cleanup returned inconclusive code 13;
+  the three linked test documents remain for operator review. The vendor lifecycle
+  did not pass cleanup; archiving its evidence does not settle that request.
 
 The provider [documents duplicate-order protection after timeout resubmission](https://docs.szamlazz.hu/hu/agent/generating_invoice/settings_and_rules/order-number).
-Matching recent ordinary requests can return the previous invoice; otherwise an
-already-used order number is refused. The setting is per account and checking is
-per document type, with corrective/storno exceptions and reuse after reversal.
-One observed pair supports that documented behavior, not universal concurrent
-atomicity, a processing deadline, or a measured accidental-duplicate rate.
+Checking is an account setting and is per document type, with corrective/storno
+exceptions and reuse after reversal. One ordinary pair supports that behavior,
+not universal atomicity, a processing deadline or a measured duplicate rate.
 
-## Approved ordinary-issuance direction
+## Accepted execution and evidence boundaries
 
-1. The first implementation slice is **initial ordinary invoice issuance and
-   reads**, on an isolated experimental actual-service deployment. Reissue and
-   proforma conversion are excluded from that first slice. They retain their
-   expected-document and cross-kind questions for release-scope adjudication.
-2. Duplicate-order checking enabled on the intended account is an explicit
-   deployment prerequisite. `check_account` proves neither that setting nor the
-   seller mapping; do not invent a runtime verification claim. Retain the go-live
-   account verification and document how the operator confirms this setting.
-3. Preserve stable scope/account, Order identity, external id and document intent.
-   Retain validation, ownership, collision and exclusivity rules. Completed reads
-   replay their recorded observations; any read used to authorize an open-run
-   resend must execute afresh inside that run, with prerequisite freshness reviewed.
-4. Commit unresolved intent before possible provider activity using a
-   RequestResponse-compatible durability barrier. No replayed result contains a
-   reusable send permit. An unfinished write run may query afresh and, on a
-   qualifying absence, send again under the accepted provider-deduplication premise.
-5. A **recorded** uncertain write result permits only read-only reconciliation,
-   followed by pause if inconclusive. Cancellation and kill do not clear markers
-   or settle effects. A new ingress Idempotency-Key cannot bypass retained intent.
-   There is no timed automatic resend of recorded uncertainty.
-6. Matching positive issuance evidence may complete the invocation under this
-   risk contract. It establishes a matching document, **not uniqueness or exclusion
-   of another delayed effect**. A later refusal, changed target, failed initialization
-   or empty query cannot independently settle an earlier interrupted send. The
-   production outcome/marker-clearance matrix must embody this distinction before
-   enabling the new path; deleting the Boolean alone is not an implementation.
-7. Keep provider-call deadlines, explicit no-retry/no-redirect HTTP policy,
-   execution/account-local sessions, response interpretation, exact money/query
-   facts and credential privacy. Invocation/run thresholds are not physical send
-   caps. ADR 0018's intervention requirement and prohibition on automatic resume
-   loops still apply.
+Duplicate-order checking must be enabled on the intended account and independently
+confirmed by its operator. `check_account` verifies neither that setting nor seller
+mapping. The go-live account verification remains required. Ordinary overlap is
+not proof of proforma/prepayment/final atomic deduplication.
 
-The new direction intentionally gives up strict at-most-once sending for this
-slice. It does not give up retained uncertainty once observed. An unanswered send
-that actually did nothing can still leave an Order blocked, so the operational
-recovery cost is reduced in some interruption windows, not eliminated.
+Validation, stable scope/account/namespace and document identity, monetary preflight,
+ownership, collision and exclusivity checks remain. Unresolved intent is committed
+before possible provider activity through a RequestResponse-compatible durability
+barrier. No replayed result contains a reusable send permit. Completed prerequisites
+pin references; the executing open write checks the target and applicable guards
+afresh before any resubmission. Reissue requires the exact old holder still reversed,
+never an absent holder. Positive target evidence takes precedence over subsequently
+consumed or reversed prerequisites. Issuance does not independently verify linkage
+or VAT allocation; final deduction lines remain caller-owned.
 
-## Operation and release boundaries still to decide
+Recorded uncertainty permits read-only reconciliation and pause only. A later
+refusal, changed guard, failed initialization or empty query cannot settle an earlier
+interrupted send, even on an apparently first execution. Cancellation, kill, elapsed
+time and a fresh ingress key neither clear markers nor authorize renewal. There is
+no timed resend or automatic resume loop.
 
-Corrective issuance is **not authorized under the new replay-risk contract** by
-this ADR. Its lack of deduplication is observed, and a crash before recording
-uncertainty cannot be fixed merely by pausing recorded failures. Supporting it
-requires explicit risk acceptance or a separately approved exclusion mechanism.
+Matching positive issuance can complete under accepted replay risk. It establishes
+a matching document, **not uniqueness or exclusion of a delayed old effect**.
+Deletion requires recorded acknowledgement or audited operator settlement; absence
+and code 335 cannot establish deletion of an admitted target. Order storno pins the
+original provider id, fulfillment date, appearance and derived e-invoice flag;
+same-number echoes and unnumbered success remain uncertain. Reversal evidence and
+candidate-associated notification warnings retain their existing rules. Observed
+repeat-storno behavior is not a universal exactly-once guarantee.
 
-Before production rollout, decide the behavior of every existing mutation:
-proforma, prepayment, final, corrective, Order storno/deletion, Agent storno and
-credit-entry writes, plus ordinary reissue and proforma conversion. For each,
-record its supported host/mode, evidence rule and migration behavior. Do not
-silently remove existing native handlers, route them through relaxed replay, or
-present their mere discovery registration as tested RequestResponse support.
-An experimental endpoint must prevent unsupported mutation paths before any
-provider operation; the interface for a released capability restriction remains
-an explicit decision, not an invented public fault token in this ADR.
+Agent storno retains its unmanaged query-first issue policy and no-Order guard.
+Unkeyed credit-entry registration retains additive-duplication and replacement-
+overwrite exposure after an unrecorded interruption, its existing uncertainty
+faults and caller-owned settlement. It gains no Order marker or recovery protocol.
 
-The initial direction is one deliberate execution contract, not native-strict and
-WASM-relaxed defaults. Maintaining a second permanent contract needs a concrete
-consumer and a separate decision. Existing native production behavior remains
-the implemented contract until the replacement's release scope is approved.
+## State and deployment boundary
 
-## Migration obligations
+The public `ReplayExecutionContract` names the operation-specific marker contracts.
+Their serialized `request_response_*_v1` tokens, the `unresolved-write` state key
+and existing durable command names remain stable, including the original
+ordinary-named create commands now shared by the four create kinds.
 
-This prospectively revises the arm-dependent parts of ADR 0004, ADR 0018 and the
-[implemented protected protocol](../design/order-write-protocol.md) for the approved
-slice only. Those documents still describe deployed code. ADR 0012's exact target
-intent, ADR 0014's direct Gateway permission obligations, host-owned recovery
-authorization, and ADR 0009's exceptional-replay rules are not weakened implicitly.
+Known protected and replay-enabled markers remain recoverable regardless of the
+configured mode. Exact-marker comparison preserves omitted versus explicit null
+members. Unknown contracts remain inspectable and blocking; recovery never sends.
+The distinct prepare-result wrapper requires a valid discriminator/operation pair;
+a legacy prepare result cannot become replay permission. Marker decoding
+compatibility is **not** journal replay permission.
 
-A release must use a new immutable deployment and review the actual old journal
-prefix before any exceptional replay; never replace `arm-write` semantics in place
-or resume an old armed invocation into resend permission. Object state survives
-deployment changes: old markers remain inspectable and block admission, with
-unknown versions refused conservatively. A marker-schema/policy discriminator,
-legacy recovery handling, mutation capability matrix and producer transition
-procedure must be decided before a production switch. Draining invocation journals
-alone does not establish that marker state is empty or provider effects settled.
+Every release, including same-mode Workers releases, needs a new immutable endpoint
+with old code/config retained. Quiesce all producers, settle old work, inventory
+markers and unfinished invocations, then switch registration according to the
+[transition procedure](../operations/order-execution-transition.md). Review actual
+journal prefixes before exceptional replay; never replace `arm-write` semantics in
+place or resume an old armed invocation into resend permission. Draining invocations
+alone does not establish empty marker state or settled external effects.
+
+This qualifies the arm-dependent parts of ADRs 0004 and 0018 for explicit
+replay-enabled execution. The [protected protocol](../design/order-write-protocol.md)
+still defines the default. ADR 0012's exact-target intent, ADR 0014's direct Gateway
+permission obligations, host-owned recovery authorization and ADR 0009's
+exceptional-replay requirements remain.
+
+## Host and transport
+
+Both hosts use `restate-szamlazz → szamlazz-agent → reqwest`. The initial private
+Fetch implementation and comma-header refusal were removed. A synthetic 307 exposed
+reqwest's WASM defaults; the vendor does not return redirects, and the user accepted
+reqwest's WASM redirect/header behavior for this endpoint. Shared parsing owns
+response interpretation; native HTTP configuration is unchanged.
+
+The WASM request deadline covers the full response, dropped reqwest exchanges abort,
+and Workers reauthenticates through XML without persisting sessions. The worker's
+host adaptation covers JS-future affinity, execution timers and SDK hosting. Exact
+money, query facts, credential privacy and execution/account isolation remain.
+
+The [Workers example](../../examples/workers/README.md) pins the interim SDK fix
+and builds without library test utilities. Maintained native and signed/scoped
+workerd suites exercise the actual services, interruptions, recorded uncertainty,
+pause/resume, cancellation, kill and recovery. Fake-provider runtime tests do not
+establish new live-account behavior.
 
 ## Alternatives considered
 
-- **Keep current streaming arming:** defensible conservative send protection but
-  cannot satisfy required RequestResponse progress; worker handoff can also block
-  never-sent work.
-- **Separate durable send gate:** potentially portable, but adds claim-response
-  uncertainty, delayed-claim closure, durable tombstones, ingress/capacity wiring
-  and blocked-work recovery. Not selected for this work.
-- **Automatically resend after a waiting period:** broadens risk beyond open-run
-  interruption and treats elapsed time as if it settled provider processing. Not
-  selected.
-- **Assume one retry policy works for all document types:** contradicted by the
-  corrective experiment. Not selected.
-
-Implementation and release gates are specified in the [#247 brief](../design/request-response-issuance-brief.md).
-
-## Actual-service slice (2026-09-14)
-
-The [outcome/marker-clearance table](../design/request-response-outcomes.md) now
-defines the initial ordinary experiment. Explicit opt-in selects actual Order/Agent;
-unsupported mutations are refused. All non-positive open-write results retain
-uncertainty, including later refusals, credentials and failed fresh guards. A distinct
-serialized prepare result and marker discriminator prevent a legacy prepare result
-from being decoded as ordinary resend intent; new step names alone are not that fence.
-
-The [actual-service suite](../../crates/restate-szamlazz/tests/request_response/README.md)
-reproduces the prototype's visible/invisible writes, recorded uncertainty,
-replacement, surviving execution, pause/resume and kill cases, plus changed guards
-and credential initialization. These native buffered-host results do not approve
-the production settlement/migration gates or establish Workers runtime support.
-
-## Workers host experiment (2026-09-14)
-
-### Shared ordinary extension (agreed 2026-09-14)
-
-The user approved extending the same native/Workers `create_invoice` handler to
-reissue and proforma conversion and enabling existing operator recovery. Reissue
-keeps the exact expected old invoice; an executing open run may resubmit only while
-that holder is still reversed and all fresh guards pass. A different matching
-holder settles issuance under the already accepted newest-holder non-regression
-premise; an absent holder never becomes permission for initial creation.
-
-Proforma `auto`/`none`/named selection is pinned by completed prerequisite reads,
-retained as `proforma_number` in the ordinary marker, and checked against the
-outbound request. Named selection requires a live proforma of this Order. A fresh
-check refuses a missing/reversed pinned proforma or a different live namespace
-holder/order hint. No-link stays no-link. Positive invoice evidence takes precedence
-over a now-consumed proforma. Success means issuance, not independently verified
-provider linkage; the queried invoice exposes its reference for caller policy.
-
-Both `observe_unresolved` and `recover` understand legacy markers and the known
-ordinary discriminator. Exact equality, pinned account verification, evidence
-rules and recorded recovery before clearance remain shared. Unknown contracts
-remain blocking; recovery never sends. Hosts must authorize recovery access.
-The added optional marker fields preserve decoding of prior populated markers;
-legacy deployments reject the extended shape. The ordinary prepare-run wrapper
-still requires its discriminator, so legacy prepare replay cannot grant resend
-permission. Exceptional replay still requires invocation-specific review.
-
-This extends the initial-slice exclusions above, not the remaining operation kinds
-or production rollout/migration. The explicit opt-in remains on either host.
-
-### Proforma lifecycle extension (agreed)
-
-The user accepts unfinished-run resubmission for shared `create_proforma` and
-`delete_proforma` in the experimental endpoint. Creation retains the same per-type
-duplicate-order-checking dependency and refreshes the invoice/prepayment/final
-guards before any open-run resend. Deletion repeats only after fresh verification
-of the exact number/provider id/Order/type and paid guard; namespace-owned mode
-also requires the same external-id holder. Force bypasses only the paid guard.
-An acknowledged deletion clears after its result is recorded. Absence, code335,
-later refusals, changed guards or unavailable initialization after admission do
-not settle an earlier execution and retain read-only uncertainty. Queries cannot
-establish deletion: operator recovery requires audited completion/non-execution.
-Positive completion accepts residual delayed-effect risk; it is not a fence.
-
-Proforma creates carry `request_response_proforma_v1`; deletion carries the closed
-`request_response_delete_v1` object with mode, force and document_id, beside the
-marker's existing exact target. Older deployments reject these contracts. The
-shared prepare-result wrapper validates contract/operation pairing; replay also
-compares the pinned contract before executing. Legacy journals gain no send
-permission. This extends the operation subset, not production migration approval.
-
-### Prepayment/final extension (agreed)
-
-The user approved shared prepayment/final RequestResponse issuance, including
-exact-target reissue. References are selected once from completed prerequisites;
-prepayment retains its proforma choice, final retains its exact prepayment number.
-Executing open runs discover the requested target first. Positive target evidence
-settles issuance even if the proforma was consumed or prepayment subsequently
-reversed. Without target evidence, fresh chain exclusivity and pinned-reference
-checks must pass before resubmission. An absent/reversed/changed prerequisite after
-admission retains uncertainty, never permission to substitute another chain.
-Recorded uncertainty stays read-only and exact-marker recovery remains shared.
-
-Provider per-type duplicate-order checking is a prerequisite for these operations;
-the ordinary-invoice concurrency observation is not proof of their atomic behavior.
-Success means issuance, not independently verified linkage or allocation. Final
-deduction lines remain caller-owned; linking a prepayment does not net the totals.
-
-Markers carry distinct `request_response_prepayment_v1` / `request_response_final_v1`
-contracts and final's `prepayment_number`. Known final markers require that reference,
-other contracts cannot carry it. Exact echoes retain member presence. Previous
-markers remain readable; older deployments reject these extensions. Existing
-ordinary/proforma step sequences are unchanged. Production rollout/migration and
-other mutation types remain outside this extension.
-
-### Storno extension (agreed)
-
-The user approved Order storno through the shared RequestResponse write boundary
-and enabling existing unmanaged Agent storno. The Order's open run first seeks a
-known reversal, then verifies the pinned original provider id, Order, stornoable
-type, fulfillment date and appearance before any replay send. The same original
-must still be live. Existing numbered reversal acknowledgement rules and verified
-reversal evidence settle; later refusals, changed guards and inconclusive answers
-retain uncertainty. Same-number echoes and unnumbered acknowledgements do not
-establish reversal. Recorded uncertainty stays read-only; kill/cancellation retain
-markers. Candidate-associated notification warnings keep their existing rules.
-
-The `request_response_storno_v1` marker records provider id, fulfillment date,
-derived e_invoice and reported appearance, beside the original number. Caller
-comment and explicit recipient remain the same invocation input, not additional
-marker data. Both automatic/operator document recovery check the retained original
-identity. Evidence does not prove notification delivery or exclude delayed old
-execution. This accepts observed repeat-storno behavior rather than a universal
-exactly-once guarantee. Agent storno retains its existing query-first issue policy,
-no-Order guard, acknowledgement/no-op behavior and lack of an Order marker.
-At this stage credits and corrective issuance were excluded; credit entries are
-enabled by the subsequent decision below. Corrective issuance remains excluded.
-
-### Agent credit-entry support (agreed)
-
-The user approved enabling the existing unkeyed `set_credit_entries` contract on
-the experimental endpoint, rather than inventing Order-style protection. Native
-and workerd run the same handler. Its existing one-exchange run does not deliberately
-retry, but unrecorded interruption can repeat additive entries or overwrite newer
-state in replacement mode. Recorded uncertainty becomes the existing fault, never
-an internal re-query/retry loop. Caller-owned settlement before renewal remains.
-No marker or separate credit-entry recovery is introduced. Shared runtime tests
-explicitly demonstrate these effects and completed replay without another call.
-
-All Agent handlers are now enabled with their default semantics; the test-util
-Agent opt-in is retained as a no-op for existing experimental wiring. Only Order
-still selects an experimental protocol. Corrective issuance and production
-enablement/migration remain open.
-
-### Host and transport behavior
-
-The [workers-rs example](../../examples/workers/README.md) now builds and runs the
-actual restricted services in workerd with the pinned interim SDK fix. Signed,
-scoped issuance, open-execution replacement, retained uncertainty, pause/resume,
-active cancellation and kill are exercised through real Restate. This does not
-approve the remaining production capability/settlement/migration gates.
-
-**Transport correction, user decision:** use `szamlazz-agent` with reqwest on both
-native and Cloudflare. The injected `307` test demonstrated reqwest's default WASM
-redirect behavior, not a redirect from szamlazz.hu. The user confirmed the vendor
-does not return redirects; that synthetic case is not a reason for a separate HTTP
-implementation. This supersedes the initial private Fetch implementation and its
-comma-header refusal, both removed. Reqwest's WASM redirect/header behavior is
-accepted on this endpoint; shared parsing owns header interpretation.
-
-The Számla Agent client's WASM request-level timeout covers the full response and
-reqwest aborts dropped exchanges. Workers uses XML reauthentication without session
-persistence. The worker keeps only the JS-future affinity adapter, execution timers
-and SDK hosting concerns. Native reqwest configuration is unchanged. Runtime tests
-establish fake-provider behavior, not a new live-account reauthentication observation.
+- Protected arming remains the default for consumers needing its conservative send
+  contract, but cannot satisfy normal buffered RequestResponse write progress.
+- A separate durable send gate adds claim-response uncertainty, delayed-claim
+  closure, tombstones and recovery machinery; it was not selected.
+- Waiting and automatically resending recorded uncertainty would treat elapsed time
+  as settlement; it was not selected.
+- One retry premise for all document types is contradicted by corrective overlap.
+  Replay-enabled corrective support requires a separate decision.

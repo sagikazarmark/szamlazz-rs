@@ -53,7 +53,7 @@ deletion or non-execution evidence, never absence alone.
 Recorded uncertainty stays read-only. Corrective issuance is explicitly refused
 with `invalid_input` before provider I/O in this mode on either host. Observed
 duplicate corrective effects are why it does not inherit ordinary replay policy.
-RequestResponse Order storno retains the verified original's provider id, fulfillment
+Replay-enabled Order storno retains the verified original's provider id, fulfillment
 date and appearance. An interrupted open run refreshes that original before any
 resubmission; recorded uncertainty only reconciles. Agent storno keeps its distinct
 unmanaged query-first issue policy and no-Order guard.
@@ -64,11 +64,11 @@ method with configuration and remove the Agent method. `test-util` now exposes
 only mock-sized unchecked configuration and interruption observers.
 See the [actual-service acceptance tests](tests/request_response/README.md) and
 [outcome/clearance table](../../docs/design/request-response-outcomes.md).
-The [workers-rs example](../../examples/workers/README.md) now exercises this slice
+The [workers-rs example](../../examples/workers/README.md) exercises these services
 in workerd with signed/scoped Restate calls. It documents the interim SDK patch,
 shared reqwest transport and runtime checks. The [execution-mode transition
-procedure](../../docs/operations/order-execution-transition.md) is required before
-changing an existing deployment's mode. Keep old immutable deployments for their
+procedure](../../docs/operations/order-execution-transition.md) applies to every
+release, including same-mode Workers releases. Keep old immutable deployments for their
 retained invocations; marker compatibility is not journal compatibility.
 
 The recovery marker now carries optional `execution_contract`, `proforma_number` and `prepayment_number`
@@ -76,8 +76,14 @@ fields. Existing JSON markers remain decodable; Rust code constructing
 `UnresolvedWrite` literals supplies `None` for legacy markers. Recovery requires
 the exact observed JSON, including omitted versus null members. The observation
 decoder preserves noncanonical known markers through `Other`; echo those fields
-as JSON rather than reconstructing a marker. The ordinary prepare result still
+as JSON rather than reconstructing a marker. The replay-enabled prepare result still
 requires its discriminator, so a legacy prepare cannot become resend permission.
+
+**Pre-release Rust rename (#247):** `contract::recovery::OrdinaryExecutionContract`
+is now `ReplayExecutionContract`, covering creates, deletion and storno. Serialized
+`request_response_*_v1` tokens and durable command names retain their existing
+spellings. Test observers use `WriteCheckpoint::CreateGuardsPassed` in place of
+`OrdinaryGuardsPassed`.
 
 | Operation | Protection and recovery |
 |---|---|

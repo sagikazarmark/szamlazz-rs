@@ -1329,7 +1329,8 @@ impl Gateway {
         self.lookup_inner(&request, false).instrument(span).await
     }
 
-    pub(crate) async fn lookup_initial_ordinary(
+    /// Replay-enabled admission also blocks an unselected live proforma in the hint.
+    pub(crate) async fn lookup_for_replay(
         &self,
         request: LookupRequest<'_>,
     ) -> Result<LookupOutcome, Unanswered> {

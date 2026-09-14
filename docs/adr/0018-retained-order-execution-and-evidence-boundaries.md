@@ -5,11 +5,12 @@ bounded prerequisite/initialization lifecycle, ADR 0012's final expected-holder
 classification, and qualifies ADR 0005's newest-holder premise. Credit-entry
 write protection is deferred; its existing unkeyed contract still applies.
 
-Prospective amendment: [ADR 0019](0019-request-response-ordinary-invoice-replay.md)
-selects RequestResponse ordinary issuance with explicit open-run replay risk.
-Its approved first slice and migration gates qualify the arm-dependent discussion
-below for the isolated `test-util` experiment; they do not relax every Order mutation or authorize
-resending from an old retained arm journal.
+Amendment: [ADR 0019](0019-request-response-ordinary-invoice-replay.md) defines
+explicit `protected` (default) and `replay_enabled` Order execution. Its
+operation-specific replay-risk and settlement rules qualify the arm-dependent
+discussion below for replay-enabled execution; correctives remain protected-only.
+Neither marker compatibility nor a mode change authorizes resending from an old
+retained arm journal.
 
 ## Retained business execution
 

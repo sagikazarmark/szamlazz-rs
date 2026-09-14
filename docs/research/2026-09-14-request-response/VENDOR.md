@@ -1,5 +1,9 @@
 # Vendor overlap prototype — 2026-09-14
 
+Archived findings; the one-off runner was retired after #247. Its source remains
+in commit `55d3c3d` at `crates/restate-szamlazz/tests/prototype_request_response/vendor.rs`.
+Archiving does not settle the inconclusive corrective cleanup below.
+
 ## Result
 
 **Two overlapping identical ordinary invoice requests returned the same number
@@ -68,7 +72,7 @@ corrective, which was independently queried by its reported number.
   observations. It must not be reported as a fully passing lifecycle.
 - A separate read-only follow-up successfully queried `CTEST-2026-30`,
   `CTEST-2026-31`, `CTEST-2026-32`. All still existed, reported `test: true`, and
-  none reported `reversed: true` (`reversed` parsed as `None`). This is current
+   none reported `reversed: true` (`reversed` parsed as `None`). This is the recorded
   observation, not proof that the earlier cleanup request cannot act later.
 - Those three documents remain on the test account for operator review; the
   corrective cleanup request remains inconclusive by the library's classification.
@@ -89,32 +93,14 @@ corrective, which was independently queried by its reported number.
 5. No failure was injected into the live exchanges. This does not measure how
    frequently a real Restate interruption would lead to overlapping submissions.
 
-## Artifacts and commands
+## Retained artifacts
 
-- [vendor.rs](vendor.rs): opt-in probe and separate read-only follow-up.
 - [vendor-observed-2026-09-14.json](vendor-observed-2026-09-14.json): incrementally
   persisted exchange metadata, parsed identities and cleanup outcome.
 - [vendor-followup-2026-09-14.json](vendor-followup-2026-09-14.json): exact-number
   read-only follow-up. Its elapsed times start at that separate process's start.
 
 The evidence contains allowlisted metadata, not full response XML, PDF, session
-cookies, credentials or buyer records. Each new run requires a new report file;
-the probe refuses to overwrite earlier evidence. No automatic test-level retry.
-
-For a **deliberate new test-account investigation**, with credentials exported:
-
-```sh
-PROTOTYPE_VENDOR_REPORT_PATH=/absolute/path/to/NEW-report.json \
-cargo test --locked -p restate-szamlazz --test prototype_request_response \
-  vendor::vendor_overlap -- --exact --ignored --nocapture
-```
-
-This creates a new set of documents; it is not recovery for the recorded run.
-Read-only observation of the existing documents:
-
-```sh
-PROTOTYPE_VENDOR_REPORT_PATH=/absolute/path/to/NEW-followup.json \
-PROTOTYPE_VENDOR_NUMBERS=CTEST-2026-30,CTEST-2026-31,CTEST-2026-32 \
-cargo test --locked -p restate-szamlazz --test prototype_request_response \
-  vendor::vendor_observe_numbers -- --exact --ignored --nocapture
-```
+cookies, credentials or buyer records. Reports were written to separate files
+without automatic test-level retry. Repeating overlap would create new documents;
+it would not recover or settle this recorded run.
