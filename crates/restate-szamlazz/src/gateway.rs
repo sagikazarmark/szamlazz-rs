@@ -1565,11 +1565,9 @@ impl Gateway {
             Ok(CreationOutcome::Issued(created)) => {
                 if request.reversed == Some(created.invoice_number.as_str()) {
                     let open = Unconfirmed::ReissueEcho;
-                    return if settlement == CreateSettlement::Immediate {
-                        self.settle_or(request, open).await
-                    } else {
-                        Err(open)
-                    };
+                    return self
+                        .settle_unconfirmed_create(request, settlement, open)
+                        .await;
                 }
                 let issued = IssuedDocument::from(created);
                 tracing::info!(number = %issued.number, "document issued");
@@ -1577,17 +1575,14 @@ impl Gateway {
             }
             // A success without a document number (a preview, which the
             // worker never asks for, or an arm the agent crate adds later):
-            // nothing the step can name, so it re-queries.
+            // nothing the step can name; the settlement policy decides when to reconcile.
             Ok(_) => {
                 let open = Unconfirmed::Open {
                     code: None,
                     message: "the create succeeded without a document number".to_owned(),
                 };
-                if settlement == CreateSettlement::Immediate {
-                    self.settle_or(request, open).await
-                } else {
-                    Err(open)
-                }
+                self.settle_unconfirmed_create(request, settlement, open)
+                    .await
             }
             Err(error) => match classify_failure("create", error) {
                 Failure::Rejected(rejection) => {
@@ -1598,32 +1593,35 @@ impl Gateway {
                     Ok(CreateOutcome::CredentialsRejected(answer))
                 }
                 Failure::Unknown(answer) => {
-                    tracing::warn!(code = %answer.code, "open code; re-querying");
+                    tracing::warn!(code = %answer.code, "create returned an open code");
                     let open = Unconfirmed::Open {
                         code: Some(answer.code),
                         message: answer.message,
                     };
-                    if settlement == CreateSettlement::Immediate {
-                        self.settle_or(request, open).await
-                    } else {
-                        Err(open)
-                    }
+                    self.settle_unconfirmed_create(request, settlement, open)
+                        .await
                 }
                 Failure::Unavailable(message) => {
-                    if settlement != CreateSettlement::Immediate {
-                        return Err(Unconfirmed::Unavailable(message));
+                    if settlement == CreateSettlement::Immediate {
+                        tracing::warn!("szlahu_down on the create; re-querying");
                     }
-                    tracing::warn!("szlahu_down on the create; re-querying");
-                    self.settle_or(request, Unconfirmed::Unavailable(message))
-                        .await
+                    self.settle_unconfirmed_create(
+                        request,
+                        settlement,
+                        Unconfirmed::Unavailable(message),
+                    )
+                    .await
                 }
                 Failure::Transport(message) => {
-                    if settlement != CreateSettlement::Immediate {
-                        return Err(Unconfirmed::Transport(message));
+                    if settlement == CreateSettlement::Immediate {
+                        tracing::warn!("transport failure; re-querying");
                     }
-                    tracing::warn!("transport failure; re-querying");
-                    self.settle_or(request, Unconfirmed::Transport(message))
-                        .await
+                    self.settle_unconfirmed_create(
+                        request,
+                        settlement,
+                        Unconfirmed::Transport(message),
+                    )
+                    .await
                 }
                 Failure::Duplicate(answer) => {
                     tracing::info!(code = %answer.code, "duplicate order number; re-querying");
@@ -1640,6 +1638,21 @@ impl Gateway {
                     })
                 }
             },
+        }
+    }
+
+    /// Apply the selected timing without claiming a read that this execution defers.
+    async fn settle_unconfirmed_create(
+        &self,
+        request: &CreateStepRequest<'_>,
+        settlement: CreateSettlement,
+        unconfirmed: Unconfirmed,
+    ) -> Result<CreateOutcome, Unconfirmed> {
+        match settlement {
+            CreateSettlement::Immediate => self.settle_or(request, unconfirmed).await,
+            CreateSettlement::Retained | CreateSettlement::RetainedWithDuplicateEvidence => {
+                Err(unconfirmed)
+            }
         }
     }
 

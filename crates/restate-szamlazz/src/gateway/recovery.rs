@@ -387,10 +387,6 @@ impl Gateway {
     }
     /// Replay-enabled creation: open-run replay may submit again after fresh absence and
     /// guards. Kept distinct from the public consumed-permission contract.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "keep fresh target, cross-kind and pinned proforma guards in send order"
-    )]
     pub(crate) async fn create_replay_enabled<F, Fut>(
         &self,
         request: super::CreateStepRequest<'_>,
@@ -400,7 +396,6 @@ impl Gateway {
         F: FnOnce() -> Fut + Send,
         Fut: std::future::Future<Output = ()> + Send,
     {
-        use crate::identity::{DocumentKind, IssuedKind};
         // Defence in depth: this seam is never a blanket permission for kinds.
         if request.replay_contract().is_none() || request.corrected_number.is_some() {
             return WriteResult::unresolved("unsupported replay-enabled issuance intent");
@@ -435,13 +430,44 @@ impl Gateway {
             }
             Err(_) => return WriteResult::unresolved("holder query failed"),
         }
-        let Ok(namespace) = request.external_id.namespace().parse() else {
-            return WriteResult::unresolved("invalid issuance namespace");
-        };
+        // Target evidence settles first, even if a prerequisite has since changed.
+        // Keep these reads sequential: namespace guards, pinned references, then hint.
+        if let Err(unresolved) = self.check_replay_create_kinds(&request).await {
+            return WriteResult::Unresolved(unresolved);
+        }
+        if let Err(unresolved) = self.check_replay_create_references(&request).await {
+            return WriteResult::Unresolved(unresolved);
+        }
+        if let Err(unresolved) = self.check_replay_create_hint(&request).await {
+            return WriteResult::Unresolved(unresolved);
+        }
+        before_send().await;
+        replay_create_result(
+            self.create_send(
+                &request,
+                super::CreateSettlement::RetainedWithDuplicateEvidence,
+            )
+            .await,
+            request.external_id.namespace(),
+        )
+    }
+
+    async fn check_replay_create_kinds(
+        &self,
+        request: &super::CreateStepRequest<'_>,
+    ) -> Result<(), WriteDiagnostic> {
+        use crate::identity::{DocumentKind, IssuedKind};
+        let namespace = request
+            .external_id
+            .namespace()
+            .parse()
+            .map_err(|_| WriteDiagnostic::new("invalid issuance namespace"))?;
         let proforma = request.proforma_number();
         let prepayment = request.prepayment_number();
         if request.kind == IssuedKind::Final && prepayment.is_none() {
-            return WriteResult::unresolved("final issuance requires pinned prepayment");
+            return Err(WriteDiagnostic::new(
+                "final issuance requires pinned prepayment",
+            ));
         }
         let guarded = if request.kind == IssuedKind::Proforma {
             [
@@ -478,7 +504,7 @@ impl Gateway {
                 Ok(super::OwnershipOutcome::Absent | super::OwnershipOutcome::Reversed(_))
                     if kind == DocumentKind::Prepayment && request.kind == IssuedKind::Final =>
                 {
-                    return WriteResult::unresolved("pinned prepayment absent or reversed");
+                    return Err(WriteDiagnostic::new("pinned prepayment absent or reversed"));
                 }
                 Ok(super::OwnershipOutcome::Absent | super::OwnershipOutcome::Reversed(_)) => {}
                 Ok(super::OwnershipOutcome::Live(found))
@@ -486,37 +512,45 @@ impl Gateway {
                         && proforma == Some(found.number.as_str()) => {}
                 Ok(super::OwnershipOutcome::CredentialsRejected(answer)) => {
                     answer.warn_credentials_rejected(request.external_id.namespace());
-                    return WriteResult::unresolved(format!(
+                    return Err(WriteDiagnostic::new(format!(
                         "fresh {kind} credentials rejected: {}",
                         answer.code
-                    ));
+                    )));
                 }
                 _ => {
-                    return WriteResult::unresolved(format!(
+                    return Err(WriteDiagnostic::new(format!(
                         "fresh {kind} guard did not permit issuance"
-                    ));
+                    )));
                 }
             }
         }
-        if let Some(number) = prepayment {
+        Ok(())
+    }
+
+    async fn check_replay_create_references(
+        &self,
+        request: &super::CreateStepRequest<'_>,
+    ) -> Result<(), WriteDiagnostic> {
+        use crate::identity::IssuedKind;
+        if let Some(number) = request.prepayment_number() {
             match self.verify(number).await {
                 Ok(super::QueryOutcome::Found(found))
                     if found.is_ours(request.order, IssuedKind::Prepayment) && found.is_live() => {}
                 Ok(super::QueryOutcome::CredentialsRejected(answer)) => {
                     answer.warn_credentials_rejected(request.external_id.namespace());
-                    return WriteResult::unresolved(format!(
+                    return Err(WriteDiagnostic::new(format!(
                         "prepayment credentials rejected: {}",
                         answer.code
-                    ));
+                    )));
                 }
                 _ => {
-                    return WriteResult::unresolved(
+                    return Err(WriteDiagnostic::new(
                         "pinned prepayment no longer live on this Order",
-                    );
+                    ));
                 }
             }
         }
-        if let Some(number) = proforma {
+        if let Some(number) = request.proforma_number() {
             match self.verify(number).await {
                 Ok(super::QueryOutcome::Found(found))
                     if found.carries_order(request.order)
@@ -524,16 +558,28 @@ impl Gateway {
                         && found.is_live() => {}
                 Ok(super::QueryOutcome::CredentialsRejected(answer)) => {
                     answer.warn_credentials_rejected(request.external_id.namespace());
-                    return WriteResult::unresolved(format!(
+                    return Err(WriteDiagnostic::new(format!(
                         "pinned proforma credentials rejected: {}",
                         answer.code
-                    ));
+                    )));
                 }
                 _ => {
-                    return WriteResult::unresolved("pinned proforma no longer live on this Order");
+                    return Err(WriteDiagnostic::new(
+                        "pinned proforma no longer live on this Order",
+                    ));
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn check_replay_create_hint(
+        &self,
+        request: &super::CreateStepRequest<'_>,
+    ) -> Result<(), WriteDiagnostic> {
+        use crate::identity::IssuedKind;
+        let prepayment = request.prepayment_number();
+        let proforma = request.proforma_number();
         // Unlike the ordinary best-effort lookup hint, a failed fresh hint must
         // not authorize an unfinished-run resend. Proformas can be implicitly
         // consumed even when they are not under our namespace's external id.
@@ -541,10 +587,10 @@ impl Gateway {
             Err(QueryError::NotFound) => {}
             Err(QueryError::CredentialsRejected(answer)) => {
                 answer.warn_credentials_rejected(request.external_id.namespace());
-                return WriteResult::unresolved(format!(
+                return Err(WriteDiagnostic::new(format!(
                     "fresh order hint credentials rejected: {}",
                     answer.code
-                ));
+                )));
             }
             Ok(found)
                 if (prepayment == Some(found.number.as_str())
@@ -556,18 +602,12 @@ impl Gateway {
                     || (!found.is_invoice_family()
                         && found.document_type != szamlazz_agent::DocumentType::Proforma) => {}
             _ => {
-                return WriteResult::unresolved("fresh order hint did not permit issuance");
+                return Err(WriteDiagnostic::new(
+                    "fresh order hint did not permit issuance",
+                ));
             }
         }
-        before_send().await;
-        replay_create_result(
-            self.create_send(
-                &request,
-                super::CreateSettlement::RetainedWithDuplicateEvidence,
-            )
-            .await,
-            request.external_id.namespace(),
-        )
+        Ok(())
     }
 
     /// The protected Order lookup: only absence permits a send. A holder that
