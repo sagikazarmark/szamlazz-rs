@@ -220,7 +220,7 @@ pub(crate) async fn query_retains_and_replays_only_document_facts(h: &Harness) {
     let retained = h.invoke(&call, Some(&body), Some(key)).await;
     assert_eq!(retained.invocation_id(), reply.invocation_id());
     assert_eq!(retained.body, reply.body);
-    replay_query_prefix(h, reply.invocation_id(), &reply.body).await;
+    crate::harness::query::replay_completed(h.admin(), reply.invocation_id(), &reply.body).await;
 
     // The explicit query projection must not widen Order observation journals.
     h.absent("E2E-QUERY-227", &["proforma", "prepayment", "final"])
@@ -247,59 +247,4 @@ pub(crate) async fn query_retains_and_replays_only_document_facts(h: &Harness) {
             );
         }
     }
-}
-
-async fn replay_query_prefix(h: &Harness, id: &str, expected: &serde_json::Value) {
-    let journal = h.admin().journal(id).await;
-    let query = journal
-        .iter()
-        .find(|entry| entry.is_run() && entry.name.as_deref() == Some("query"))
-        .expect("query command");
-    // Copy through the completed read, excluding Output: the same deployment
-    // must decode the Run and produce Output again without querying the provider.
-    let response = crate::common::http_client()
-        .patch(format!(
-            "{}/invocations/{id}/restart-as-new?from={}&deployment=keep",
-            h.admin().base(),
-            query.index
-        ))
-        .send()
-        .await
-        .expect("restart query prefix");
-    let status = response.status();
-    let restarted: serde_json::Value = response.json().await.expect("restart response");
-    assert!(status.is_success(), "{restarted}");
-    let new_id = restarted["new_invocation_id"]
-        .as_str()
-        .expect("new invocation id");
-    h.admin().await_status(new_id, &["completed"]).await;
-    assert!(
-        h.admin()
-            .invocation(new_id)
-            .await
-            .completion_failure
-            .is_none()
-    );
-    let replayed = h.admin().journal(new_id).await;
-    let output = replayed
-        .iter()
-        .find(|entry| entry.entry_type == "Command: Output")
-        .expect("new output");
-    let start = output
-        .raw
-        .iter()
-        .position(|byte| *byte == b'{')
-        .expect("JSON output");
-    let actual: serde_json::Value = serde_json::Deserializer::from_slice(&output.raw[start..])
-        .into_iter()
-        .next()
-        .expect("JSON value")
-        .expect("output");
-    assert_eq!(&actual, expected);
-    let original = restate_e2e_harness::run_result(&journal, "query").expect("original read");
-    let copied = restate_e2e_harness::run_result(&replayed, "query").expect("copied read");
-    assert_eq!(
-        copied.raw, original.raw,
-        "replay retains exactly the same allowlist"
-    );
 }

@@ -234,9 +234,9 @@ opt-in create/query test, **not yet executed for this change**; see the
 Both configuration types only implement `Deserialize`; the host chooses the file format and environment merging
 (a TOML file layered with environment overrides through figment, for instance).
 
-- `WorkerConfig` is the deployment-level part: the `namespace` of the external ids and the three run retry
+- `WorkerConfig` is the deployment-level part: the `namespace` of the external ids and the run retry
   policies: `[issue]` for unmanaged Agent storno, `[read]` for ordinary reads and operator document
-  verification, and `[resolve]` for account resolution. Protected Order reconciliation uses the
+  verification, optional `[query]` for explicit document queries, and `[resolve]` for account resolution. Protected Order reconciliation uses the
   handler invocation policy below. Call `validate()` after parsing.
 - `StaticConfig` is the static resolver's configuration, in one of two mutually exclusive shapes: a single
   `[account]`, served unscoped, or a table of `[accounts.<scope>]`, each served under its scope only
@@ -642,14 +642,33 @@ constructed from an ID, and recovery does not reconstruct the customer URL.
 and not one of the external-id tokens (`ExternalId::TOKENS`, in any letter case); embedded in the corrective's
 external id.
 
-`contract::InvoiceNumber` is an invoice number as the by-number requests take it (`StornoRequest`,
-`CorrectRequest`, `SetCreditEntriesRequest`, `Selector::InvoiceNumber`, `ProformaLink::Number`): 1–40 bytes, no
+`contract::InvoiceNumber` is an invoice number as mutation requests take it (`StornoRequest`,
+`CorrectRequest`, `SetCreditEntriesRequest`, `ProformaLink::Number`): 1–40 bytes, no
 whitespace, no control character, no `:`. Refused by its `Deserialize`, so a bad number is a malformed body
 (`invalid_input` before the prologue). It flows into step names and the storno external ids, hence the bound.
 The text must also be XML 1.0 representable. Discovery excludes C0/C1 controls, whitespace, `:` and
 U+FFFE/U+FFFF, but JSON Schema length counts characters: the **40 UTF-8 byte** cap is an additional
 runtime rule, so a multibyte value within the schema's character limit can still be refused.
 Distinct from `szamlazz_agent::InvoiceNumber`, the unvalidated wire type; responses echo numbers as plain strings.
+
+**Exact document queries** take `contract::ProviderDocumentNumber` in `Selector::InvoiceNumber`.
+It accepts nonblank XML 1.0 text, including whitespace, `:`, Unicode and numbers longer than 40 bytes.
+The original spelling is preserved: no trimming, case folding or Unicode normalization. The returned
+document number must match exactly; a mismatch is an unanswered read, never a successful substitute or
+an implicit fallback to the order number or newest external-id holder.
+
+There is no field-specific length cap: the provider's [query XSD](../../fixtures/upstream/agent/xsd/xmlszamlaxml.xsd)
+declares `szamlaszam` as an unrestricted `string`, and no provider-backed maximum has been established.
+Deployment request-body limits still apply. Acceptance by the worker does not guarantee provider acceptance
+of every spelling or length. `contract::recovery::EvidenceNumber` is an alias for the same type: every
+accepted recovery evidence number is representable in an exact query. Provider-returned response numbers
+remain strings and must satisfy these rules before being submitted as a selector.
+
+**Rust migration (#243):** the JSON selector stays `{"invoice_number":"…"}` and all previously valid
+selectors remain valid. Rust code passing a typed worker `InvoiceNumber` to `Selector::InvoiceNumber`
+now uses `.into()`; parsing directly into the variant infers `ProviderDocumentNumber`. The recovery
+aliases `EvidenceNumber` and `InvalidEvidenceNumber` remain available; discovery names the shared schema
+`ProviderDocumentNumber`. Mutation identifiers keep their existing rules.
 
 `OrderKey` is the `Order` key: the order number trimmed of leading and trailing whitespace, case preserved,
 validated (1–40 bytes, no control characters, no internal whitespace of any kind, no `:`, Unicode NFC; nothing
@@ -677,6 +696,8 @@ The two storno constructors take `&InvoiceNumber` (the validated worker type), r
   and delays `2m` → `10m`; the read policy runs ordinary reads and operator document verification,
   `5` / `5m`, `5s` → `60s`; the resolve policy runs the `account` step, with no attempt cap, a `1m`
   duration threshold and `1s` → `10s` delays.
+- Optional `[query]`: an independent explicit-query policy (`QueryConfig`, another `RetryPolicyConfig`
+  instantiation) for `Szamlazz.Agent.query` only. See below for inheritance and single-attempt semantics.
 
 Protected Order writes consume one acknowledged send permit. Their read-only `reconcile-write` run uses
 the **Order mutation invocation policy**, not `[issue]` or `[read]`: by default five executions with
@@ -700,6 +721,41 @@ so a value copied from a `#[handler(...)]` attribute parses. The field names are
 (`initial_delay`, `max_delay`, `max_attempts`, `max_duration`; `factor` for its `exponentiation_factor`), not the
 handler attribute's `initial_interval` / `max_interval`: those are the *invocation* retry policy, pinned in code; these
 are *run* retry policies.
+
+#### Explicit-query policy
+
+Omitting `[query]` inherits the deployment's configured `[read]` policy in full, preserving existing
+configuration behavior. A present `[query]` table has its own defaults (`5` executions / `5m`, delays
+`5s` → `60s`, factor `2`); omitted fields use those defaults, **not** a field-by-field merge with `[read]`.
+For example, a bounded search can suppress deliberate query retries with:
+
+```toml
+[query]
+max_attempts = 1
+```
+
+This controls the `query` durable step, not account resolution, credential acquisition or handler
+invocation retries. The Gateway disables HTTP transport retries and redirects. An unanswered executing
+read exhausts this policy as the existing `unavailable` fault; credential, vendor-code, not-found,
+exact-number mismatch and cancellation handling retain their existing meanings. Ordinary mutation reads,
+operator verification and retained Order reconciliation keep their own policies.
+
+The count includes the initial **Run execution**; it is not a count of logical invocations or a durable
+wire-admission budget. A process interruption after a request reaches szamlazz.hu but before its result
+is recorded can execute that read again, even with `max_attempts = 1`. Strict crash-proof provider-request
+accounting requires a separate admission protocol; this setting does not provide one.
+
+Completed steps replay their recorded facts without another provider read. The same retained
+`Idempotency-Key` returns the prior completion, including an exhausted fault; a fresh observation needs
+a fresh invocation/key. Query journal retention remains `1d`; this override changes no retention setting.
+The real-Restate tests cover both completed-prefix replay without another request and interruption of an
+unfinished single-attempt query followed by a second request.
+
+**Configuration migration (#244):** `[query]` is deployment-level, not a request field. Existing configuration
+files need no changes; send the new table only to code supporting it (older configuration decoders reject
+unknown keys). Rust `WorkerConfig` literals gain `query: None` or use `WorkerConfig::new`. Existing
+invocations remain on their immutable deployment; apply ADR 0009 to exceptional replay rather than
+assuming unchanged step names establish replay compatibility.
 
 Each policy's `run_retry_policy()` is the `RunRetryPolicy` its steps run under. `validate()` checks the
 cross-field invariants (`max_attempts ≥ 1` where set, `initial_delay ≤ max_delay`, a finite `factor ≥ 1`) and one floor:
@@ -1067,7 +1123,7 @@ to settle; a client deadline does not prove that szamlazz.hu has stopped process
 
 **An invocation attempt is spent on retained read-only reconciliation or a worker-side failure** (the worker unreachable, a rollout cutting the
 connection, the abort timeout, an undecodable journal), not on an explicitly delayed run retry: a step re-executed under `[issue]`,
-`[read]` or `[resolve]` is re-dispatched by the server without advancing the handler's attempt count (verified end
+`[read]`, `[query]` or `[resolve]` is re-dispatched by the server without advancing the handler's attempt count (verified end
 to end against 1.7.8). Run policies govern ordinary reads and unmanaged Agent storno. Order's retained
 reconciliation and infrastructure failures spend its invocation policy (~24 min of delays with defaults).
 No retry threshold is a hard send or elapsed-time bound; protected Order writes instead have one-use permission.
@@ -1095,6 +1151,8 @@ Candidate document and issued/reversal attestation numbers use `contract::recove
 nonblank XML 1.0 text, preserving the exact vendor spelling without the mutation input's 40-byte bound or
 restrictions on whitespace and `:`. Deleted numbers remain bounded mutation targets and must equal the
 marker’s pinned number. Recovery never authorizes using an evidence number as a new mutation target.
+`EvidenceNumber` aliases `ProviderDocumentNumber`, so its exact spelling can also be submitted to
+`Szamlazz.Agent.query` without narrowing or normalization.
 
 Alternatively, independently confirmed completion can be submitted as audited positive settlement:
 
@@ -1168,7 +1226,8 @@ ours is `already_issued` (or `conflict{live}` with `reissue`), a reversed one is
 ours is `conflict{foreign}`.
 
 Like the ordinary read-only steps of both services (the exclusivity and proforma-link lookups before it, the verifies,
-the order-number hint, the storno lookup, `get`'s four queries, `Szamlazz.Agent.query`, `query_taxpayer`'s one
+the order-number hint, the storno lookup, `get`'s four queries, `Szamlazz.Agent.query` unless overridden by
+`[query]`, `query_taxpayer`'s one
 step `lookup-taxpayer-{prefix}`, the `check_account` probe) it runs under the **read policy** (`[read]`: `5` executions
 `5s` → `60s`, duration threshold `5m` by default). Every szamlazz.hu *answer* is journaled data, and a query szamlazz.hu
 did not answer (a transport or parse failure, `szlahu_down`) is the step's retryable error (`Unanswered`),

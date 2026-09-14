@@ -276,7 +276,7 @@ hazard is superseded by this interrupted-run boundary.
 | Handler | Input → Output | Notes |
 |---|---|---|
 | `check_account` | `()` → `CheckAccountResponse { scope, account: { id }, namespace, credentials }` | the read-only probe for onboarding and deploy pipelines, and the deploy-time canary for the experimental flags: the prologue, then `probe`, querying `{namespace}:check-account` under the read policy (§9). `credentials` is `{state: ok}` on any answer but a credential code, `{state: rejected, code, message}` on 3/135/136/164 (**data, not a fault**); no answer is `Unanswered`, retried, then `unavailable` on exhaustion. `scope: null` under a scoped call means protocol v7 did not forward the scope. Credential acceptance is its only szamlazz.hu-verified fact; `account.id` echoes configuration. The seller and test/live check is the executable `verify_seller` example with the deployed `Accounts` bundle (§10), not this probe or the projected `query`. Issues nothing. `max_attempts = 3, kill`; `journal_retention = "1d"`; `inactivity_timeout = 2m, abort_timeout = 2m` (one read; #114) |
-| `query` | `QueryRequest { selector }` → `QueryResponse` | one step (`query`) under the read policy, journaling `QueryOutcome<QueryResponse>` with the worker's document facts, minimal buyer identity and per-VAT subtotals from the same read (#227), never the agent crate's `InvoiceDocument`. `QueryResponse` deliberately omits the seller block; `test` is as reported, compared with nothing (`null` when `teszt` is absent, never an invented `false`, #70). The seller check therefore uses the direct Számla Agent example (§10). 7 → `TerminalError{not_found}` (404); another code → `TerminalError{szamlazz_error}` (422), the code in `szamlazz_code`; 3/135/136/164 → `credentials_rejected`; an exhausted read → `unavailable`. `max_attempts = 3, kill`; `journal_retention = "1d"`; `inactivity_timeout = 2m, abort_timeout = 2m` (one read; #114) |
+| `query` | `QueryRequest { selector }` → `QueryResponse` | one step (`query`) under the explicit-query policy (§9), inheriting the configured read policy when no override is set (#244), journaling `QueryOutcome<QueryResponse>` with the worker's document facts, minimal buyer identity and per-VAT subtotals from the same read (#227), never the agent crate's `InvoiceDocument`. Exact-number selectors take the nonblank XML-safe `ProviderDocumentNumber`, shared with recovery evidence; spelling is preserved and the returned number must match (#243; [identity contract](../../crates/restate-szamlazz/README.md#identity)). `QueryResponse` deliberately omits the seller block; `test` is as reported, compared with nothing (`null` when `teszt` is absent, never an invented `false`, #70). The seller check therefore uses the direct Számla Agent example (§10). 7 → `TerminalError{not_found}` (404); another code → `TerminalError{szamlazz_error}` (422), the code in `szamlazz_code`; 3/135/136/164 → `credentials_rejected`; an exhausted read → `unavailable`. `max_attempts = 3, kill`; `journal_retention = "1d"`; `inactivity_timeout = 2m, abort_timeout = 2m` (one read; #114) |
 | `query_taxpayer` | `QueryTaxpayerRequest { tax_number }` → `QueryTaxpayerResponse { valid, name?, tax_number?, vat_code?, addresses[] }` | the NAV taxpayer lookup (`xmltaxpayer`) on the account the scope resolves to, so an embedder needs no second credential path for this one read. `tax_number` is the bare eight-digit stem (`12345678`) or the full `NNNNNNNN-N-NN` form (`12345678-2-42`), nothing else, no whitespace, no other separator; the handler derives the prefix, and a number in neither form is `TerminalError{invalid_input}` naming the input and the accepted forms, refused **before the prologue** like a malformed body (nothing journaled, nothing sent). Then the prologue as every handler and one step, `lookup-taxpayer-{prefix}` (the prefix, not the number as sent, so the stem and the full number name the same entry) under the read policy (§9), journaling the crate-owned projection (`TaxpayerOutcome::Found(QueryTaxpayerResponse)`), never the agent crate's `TaxpayerInfo`. **Every answer is data**: `valid: false` (NAV knows no taxpayer under the prefix) is a normal 200; 3/135/136/164 → `credentials_rejected`; any other `funcCode ≠ OK` (szamlazz.hu's own code or NAV's relayed `errorCode`) is an *answer*, passed through as `TerminalError{szamlazz_error}` (422, the code in `szamlazz_code`) like `query`'s and never retried, so a NAV outage surfaces as a terminal 422 the caller may retry with a new `Idempotency-Key`; an exchange that produced no answer is the read's `Unanswered`, re-executed, `unavailable` on exhaustion. Finds no document (a taxpayer record is NAV's, not the account's). No caching in the worker (ADR 0005: nothing to store that szamlazz.hu does not answer); the caller caches, with a TTL on the order of a day. `max_attempts = 3, kill`; `journal_retention = "1d"`; `inactivity_timeout = 2m, abort_timeout = 2m` (one read; #114) |
 | `set_credit_entries` | `SetCreditEntriesRequest { invoice_number, entries[≤5], additive }` → `SetCreditEntriesResponse` | `RegisterCreditEntry` without a preceding query; run `max_attempts(1)`, no deliberate run retry. Lost/inconclusive answers, cancellation and vendor refusals (including 53/57/463) → `outcome_unknown`, preserving the vendor code: a refusal settles the latest exchange, not a possible earlier execution of the open run. A sixth entry or empty replacement is `invalid_input` before the wire; 3/135/136/164 → `credentials_rejected`. **Additive is at-least-once**: every landed send appends. Settle earlier execution and exclude delayed execution before renewal; then query and send only still-required additive entries or the current intended replacement. Invocation retry policy: `initial_interval = 2m, max_attempts = 2, kill`; delay is not negative-settlement evidence. `inactivity_timeout = 2m, abort_timeout = 2m`. Unkeyed, not serialised per invoice. |
 | `storno` | `StornoRequest` → `StornoResponse` | verify first (`verify-original-{number}`, read policy; 7 → `not_found`, 404). A document carrying a supported order number → `managed_by_order` with `order_key`; an unsupported one → `unsupported_order_number` (below), both without sending. An unmanaged document already reversed → `reversed{storno_number?}`, from a **best-effort** `lookup-storno-{number}` under the read policy (exhaustion leaves the number absent, cancellation propagates). Then an original without `telj` → `unavailable`, nothing sent (ADR 0007); otherwise the unkeyed lookup and storno of §6 under `"{namespace}:by-number:{number}:storno"`, repeating the original's `telj`. No document-type pre-check: the echo tells. 3/135/136/164 → `credentials_rejected`. Read policy for lookup, issue policy for storno; no Order marker or send permit. Invocation `initial_interval = 2m, factor = 2.0, max_interval = 10m, max_attempts = 5, kill`; `inactivity_timeout = 4m, abort_timeout = 3m`, sized for query, send and re-query at 60 s each (ADR 0004, #87). |
@@ -332,7 +332,8 @@ caller authorization. Marker reads/set/clear are state commands, not run names.
 | `Szamlazz.Agent` | `storno` | `namespace`, `account`, `verify-original-{number}`, `lookup-storno-{number}`, `storno-{number}` |
 
 Which policy runs each: `namespace` is pure (`max_attempts(1)`); `account` runs under the resolve policy;
-`lookup-*`, `verify-*`, `hint-storno-*`, `probe` and `query` use the read policy (§9). Order mutations add
+`lookup-*`, `verify-*`, `hint-storno-*` and `probe` use the read policy (§9); `query` uses the
+explicit-query override when configured, otherwise that same read policy. Order mutations add
 `prepare-write` and `arm-write` before their named one-use write, then `reconcile-write` on uncertainty;
 that read uses the mutation invocation policy and pauses on exhaustion. Only unmanaged Agent storno uses
 the issue policy. Agent `set-credit-entries-*` is one-shot (`max_attempts(1)`) but may repeat after a crash;
@@ -893,8 +894,8 @@ rules below, which are also the rules for an embedder. The rules:
 
 Two configuration types, both serde-`Deserialize` only (the host chooses the format) and closed at every level
 (`#[serde(deny_unknown_fields)]`). `WorkerConfig` is the deployment-level part the services hold, the namespace
-(`identity::Namespace`) and the three run retry policies, one `RetryPolicyConfig<T: Table>` each (`IssueConfig`,
-`ReadConfig`, `ResolveConfig` are its three instantiations; the table names the policy in an error and carries its
+(`identity::Namespace`) and the run retry policies, one `RetryPolicyConfig<T: Table>` each (`IssueConfig`,
+`ReadConfig`, `QueryConfig`, `ResolveConfig`; the table names the policy in an error and carries its
 defaults; `max_attempts` is optional on every table, unset by default on `[resolve]`); `WorkerConfig::validate`
 yields the `ValidatedWorkerConfig` the services are built from, the one constructor a deployment has (#128).
 `StaticConfig` is the static resolver's account, read through the closed `StaticAccount` (the `Account` fields plus the
@@ -921,6 +922,9 @@ factor = 2.0
 max_delay = "60s"
 max_duration = "5m"           # checked after failure; can overshoot and does not interrupt a hung closure
 
+[query]      # optional: explicit Szamlazz.Agent.query only; omit to inherit configured [read]
+max_attempts = 1              # suppresses deliberate retries, not a durable wire-admission cap
+
 [resolve]    # the resolve policy: the prologue's `account` step; max_attempts unset: duration is the sole exhaustion threshold
 initial_delay = "1s"
 factor = 2.0
@@ -941,11 +945,18 @@ five executions, `2m` → `10m` doubling delays, then pause. SDK `ServiceOptions
 host overrides; retain pause-on-exhaustion and verify effective discovery settings. See
 [effective controls](../operations/order-recovery.md#effective-retry-controls).
 
-The three configured run policies are set explicitly because the SDK's default run policy sends no retry delay and the
+Explicit document queries use a separately selectable deployment policy (#244). An omitted `[query]`
+inherits configured `[read]` in full; a present table defaults like `ReadConfig`, without merging individual
+fields from `[read]`. Its `max_attempts = 1` suppresses deliberate retries of the query Run, but interruption
+before recording the result can repeat the provider request. Completed observations replay without a new read;
+a fresh observation requires a fresh invocation/key. The existing fault mappings and retention apply. See the
+[caller configuration contract](../../crates/restate-szamlazz/README.md#explicit-query-policy).
+
+The configured run policies are set explicitly because the SDK's default run policy sends no retry delay and the
 server would spend the handler's `invocation_retry_policy` instead. Durations are `"90s"`, `"2m"`, `"1h"` or a bare
 non-negative integer of seconds. `WorkerConfig::validate` checks the cross-field
 invariants (`max_attempts ≥ 1` where set, `initial_delay ≤ max_delay` and a finite `factor ≥ 1` on all
-three) and the one floor: `issue.initial_delay ≥ IssueConfig::MIN_INITIAL_DELAY`, the Számla Agent client's exported
+tables) and the one floor: `issue.initial_delay ≥ IssueConfig::MIN_INITIAL_DELAY`, the Számla Agent client's exported
 `REQUEST_TIMEOUT` (60 s) plus a 30 s margin. This retained operational spacing for unmanaged Agent storno
 does not establish that a cut execution's send has finished; its repeat policy relies on observed storno behavior,
 not elapsed time (ADR 0004). The floor dates to #61; the read

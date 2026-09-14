@@ -5,7 +5,7 @@
 //! [`WorkerConfig`] is what is constant for a deployment, is not
 //! account-shaped, and therefore neither travels in a request payload nor
 //! routes through the gateway: the namespace of the external ids and the
-//! three run retry policies, one [`RetryPolicyConfig`] per table:
+//! run retry policies, one [`RetryPolicyConfig`] per table:
 //!
 //! ```toml
 //! namespace = "acct"            # the external-id prefix; permanent
@@ -23,6 +23,10 @@
 //! factor = 2.0
 //! max_delay = "60s"
 //! max_duration = "5m"
+//!
+//! [query]                       # optional override for Szamlazz.Agent.query only
+//! max_attempts = 1              # no deliberate retry; not a crash-proof wire cap
+//!                              # omit the table to inherit the configured [read]
 //!
 //! [resolve]                     # the run retry policy of the `account` step
 //! initial_delay = "1s"         # no max_attempts: the duration is the bound
@@ -72,7 +76,9 @@ use table::Table;
 /// writes send at most once and reconcile under their handler invocation policy.
 /// The read policy governs ordinary reads and operator document verification;
 /// retained Order reconciliation uses the invocation policy instead. The resolve policy
-/// is the run retry policy of the `account` step. All three policies default
+/// is the run retry policy of the `account` step. The optional query policy
+/// overrides the read policy for explicit document queries alone. Absent query
+/// configuration inherits the configured read policy; the other policies default
 /// when absent. [`validate`](Self::validate) checks the cross-field
 /// invariants `Deserialize` cannot express and yields the
 /// [`ValidatedWorkerConfig`] the services take.
@@ -88,6 +94,11 @@ pub struct WorkerConfig {
     /// reconciliation uses the handler's invocation policy instead.
     #[serde(default)]
     pub read: ReadConfig,
+    /// Explicit `Szamlazz.Agent.query` override. `None` inherits [`Self::read`],
+    /// including its deployment-specific settings. A present table uses query
+    /// defaults for omitted fields, not a field-by-field merge with `read`.
+    #[serde(default)]
+    pub query: Option<QueryConfig>,
     /// The resolve policy: the run retry policy of the `account` step.
     #[serde(default)]
     pub resolve: ResolveConfig,
@@ -102,6 +113,7 @@ impl WorkerConfig {
             namespace,
             issue: IssueConfig::default(),
             read: ReadConfig::default(),
+            query: None,
             resolve: ResolveConfig::default(),
         }
     }
@@ -128,6 +140,10 @@ impl WorkerConfig {
     fn check(&self) -> Result<(), WorkerConfigError> {
         self.issue.check_attempts()?;
         self.read.check_attempts()?;
+        if let Some(query) = &self.query {
+            query.check_attempts()?;
+            query.check_delays()?;
+        }
         self.resolve.check_attempts()?;
         if self.issue.initial_delay < IssueConfig::MIN_INITIAL_DELAY {
             return Err(WorkerConfigError::IssueDelayBelowFloor {
@@ -139,6 +155,16 @@ impl WorkerConfig {
         self.read.check_delays()?;
         self.resolve.check_delays()?;
         Ok(())
+    }
+
+    /// The run retry policy for explicit document queries. An omitted query
+    /// table inherits the configured read policy in full.
+    #[must_use]
+    pub fn query_retry_policy(&self) -> RunRetryPolicy {
+        self.query.as_ref().map_or_else(
+            || self.read.run_retry_policy(),
+            QueryConfig::run_retry_policy,
+        )
     }
 }
 
@@ -245,9 +271,9 @@ pub enum WorkerConfigError {
     },
 }
 
-/// The three tables a [`RetryPolicyConfig`] is read from, as types: each
-/// carries its name and its defaults, so one struct serves the three
-/// policies with three sets of defaults, and the table types are the one
+/// The tables a [`RetryPolicyConfig`] is read from, as types: each
+/// carries its name and its defaults, so one struct serves the
+/// policies, and the table types are the one
 /// enumeration of the policies (#184: a `Policy` enum once doubled them).
 pub mod table {
     use std::fmt;
@@ -256,10 +282,10 @@ pub mod table {
     use super::RetryPolicyConfig;
 
     /// A policy table of the [`WorkerConfig`](super::WorkerConfig): its name
-    /// and its defaults. Sealed: the three tables are the deployment's.
+    /// and its defaults. Sealed: the tables are the deployment's.
     pub trait Table: sealed::Sealed + Sized + fmt::Debug + Clone + Copy + PartialEq + Eq {
         /// The table's key in the deployment configuration (`issue`, `read`,
-        /// `resolve`), as a [`WorkerConfigError`](super::WorkerConfigError)
+        /// `query`, `resolve`), as a [`WorkerConfigError`](super::WorkerConfigError)
         /// names it.
         const NAME: &'static str;
 
@@ -281,6 +307,11 @@ pub mod table {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub enum Read {}
 
+    /// `[query]`: explicit document queries only. A present table defaults like
+    /// `[read]`; omitting the table inherits the deployment's configured read policy.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum Query {}
+
     /// `[resolve]`: the run retry policy of the `account` step. Defaults:
     /// no attempt cap, `1s → 10s` doubling, bounded at `1m`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -288,6 +319,7 @@ pub mod table {
 
     impl sealed::Sealed for Issue {}
     impl sealed::Sealed for Read {}
+    impl sealed::Sealed for Query {}
     impl sealed::Sealed for Resolve {}
 
     impl Table for Issue {
@@ -331,6 +363,21 @@ pub mod table {
             )
         }
     }
+
+    impl Table for Query {
+        const NAME: &'static str = "query";
+
+        fn defaults() -> RetryPolicyConfig<Self> {
+            let read = Read::defaults();
+            RetryPolicyConfig::new(
+                read.max_attempts,
+                read.initial_delay,
+                read.factor,
+                read.max_delay,
+                read.max_duration,
+            )
+        }
+    }
 }
 
 /// The issue policy: the run retry policy of unmanaged `Szamlazz.Agent.storno`.
@@ -348,7 +395,7 @@ pub type IssueConfig = RetryPolicyConfig<table::Issue>;
 /// The read policy: the run retry policy of ordinary read-only durable steps of
 /// both services (the lookup step and the exclusivity, proforma-link and
 /// `get` lookups, the verifies, the order-number hint, the storno lookup,
-/// `Szamlazz.Agent.query` and the `check_account` probe). A read that
+/// `Szamlazz.Agent.query` unless overridden, and the `check_account` probe). A read that
 /// szamlazz.hu did not answer (a transport or parse failure, `szlahu_down`)
 /// is the step's retryable error, re-executed after `initial_delay`, the
 /// delay multiplied by `factor` up to `max_delay`, until `max_attempts`
@@ -371,6 +418,18 @@ pub type IssueConfig = RetryPolicyConfig<table::Issue>;
 /// worker outage is the invocation retry policy's business.
 pub type ReadConfig = RetryPolicyConfig<table::Read>;
 
+/// The optional run retry policy of `Szamlazz.Agent.query` alone. A present
+/// table has the same defaults as [`ReadConfig`]; an absent table inherits the
+/// deployment's configured read policy in full. It changes neither ordinary
+/// mutation reads nor retained Order reconciliation's invocation policy.
+///
+/// `max_attempts = 1` disables deliberate retries of an executing query. The
+/// Gateway disables transport retries; interruption before the result is recorded
+/// can still re-execute the read. This is not a durable wire-admission budget.
+/// Exhaustion remains `unavailable`; completed reads replay their recorded facts.
+/// A fresh observation requires a fresh invocation rather than a retained key.
+pub type QueryConfig = RetryPolicyConfig<table::Query>;
+
 /// The resolve policy: the run retry policy of the `account` step of every
 /// handler, which asks the account resolver for the request's account. An
 /// unavailable resolver is retried under it (`initial_delay` growing by
@@ -386,7 +445,7 @@ pub type ReadConfig = RetryPolicyConfig<table::Read>;
 pub type ResolveConfig = RetryPolicyConfig<table::Resolve>;
 
 /// A run retry policy as one table of the [`WorkerConfig`] configures it:
-/// the [`IssueConfig`], [`ReadConfig`] and [`ResolveConfig`] are this one
+/// the [`IssueConfig`], [`ReadConfig`], [`QueryConfig`] and [`ResolveConfig`] are this one
 /// struct with the table's defaults ([`Table::defaults`]). Restate
 /// re-executes the step after `initial_delay`, multiplying the delay by
 /// `factor` up to `max_delay`, until `max_attempts` executions (when set) or
@@ -420,23 +479,23 @@ pub type ResolveConfig = RetryPolicyConfig<table::Resolve>;
 pub struct RetryPolicyConfig<T: Table> {
     /// Execution-count exhaustion threshold, including the first; actual
     /// executions can exceed it. `None` leaves duration as the sole exhaustion
-    /// threshold. Default `5` on `[issue]` and `[read]`,
+    /// threshold. Default `5` on `[issue]`, `[read]` and a present `[query]`,
     /// unset on `[resolve]`.
     pub max_attempts: Option<u32>,
     /// Delay before the first re-execution. Default `2m` on `[issue]` (at
-    /// least [`IssueConfig::MIN_INITIAL_DELAY`]), `5s` on `[read]`, `1s` on
+    /// least [`IssueConfig::MIN_INITIAL_DELAY`]), `5s` on `[read]` / `[query]`, `1s` on
     /// `[resolve]`.
     #[serde(with = "duration_str")]
     pub initial_delay: Duration,
     /// Multiplier of the delay after each re-execution. Default `2.0`.
     pub factor: f32,
-    /// Cap of the delay. Default `10m` on `[issue]`, `60s` on `[read]`, `10s`
+    /// Cap of the delay. Default `10m` on `[issue]`, `60s` on `[read]` / `[query]`, `10s`
     /// on `[resolve]`.
     #[serde(with = "duration_str")]
     pub max_delay: Duration,
     /// Retry-duration exhaustion threshold, checked after closure failure;
     /// can overshoot and does not interrupt a hung closure. Default `1h` on
-    /// `[issue]`, `5m` on `[read]`, `1m` on `[resolve]`.
+    /// `[issue]`, `5m` on `[read]` / `[query]`, `1m` on `[resolve]`.
     #[serde(with = "duration_str")]
     pub max_duration: Duration,
     #[serde(skip)]

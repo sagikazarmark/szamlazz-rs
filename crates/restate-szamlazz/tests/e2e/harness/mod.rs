@@ -25,6 +25,7 @@
 
 pub(crate) mod accounts;
 pub(crate) mod ingress;
+pub(crate) mod query;
 pub(crate) mod run_names;
 mod state;
 pub(crate) mod szamlazz;

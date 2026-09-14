@@ -13,7 +13,7 @@ use szamlazz_agent::ops::taxpayer::{
 };
 
 use super::document::PaymentMethod;
-use super::{InvoiceNumber, outstanding};
+use super::{InvoiceNumber, ProviderDocumentNumber, outstanding};
 use crate::account::Account;
 use crate::gateway::{FoundDocument, RecordedCreditEntry};
 
@@ -42,8 +42,9 @@ impl QueryRequest {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Selector {
-    /// By invoice number (`számlaszám`).
-    InvoiceNumber(InvoiceNumber),
+    /// By the exact provider document number (`számlaszám`), with the same
+    /// accepted spelling as recovery evidence. The returned number must match.
+    InvoiceNumber(ProviderDocumentNumber),
     /// By order number (`rendelésszám`); returns the last document issued
     /// under it.
     OrderNumber(String),

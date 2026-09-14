@@ -101,6 +101,7 @@ mod policies;
 mod privacy;
 mod prologue;
 mod query_document;
+mod query_policy;
 mod storno;
 mod unresolved;
 mod write_commands;

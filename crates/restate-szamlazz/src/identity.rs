@@ -549,8 +549,8 @@ pub enum InvalidCorrectionId {
     Reserved(String),
 }
 
-/// A caller-supplied invoice number (`számlaszám`), as the by-number requests
-/// take it: `Szamlazz.Agent.query`'s selector, `set_credit_entries`, `storno`,
+/// A caller-supplied invoice number (`számlaszám`), as mutation requests
+/// take it: `set_credit_entries`, `storno`,
 /// `Szamlazz.Order.storno_invoice`, the base of `correct_invoice` and the
 /// `options.proforma: {number}` link.
 ///
@@ -566,6 +566,7 @@ pub enum InvalidCorrectionId {
 /// Distinct from `szamlazz_agent::InvoiceNumber`, the unvalidated wire type a
 /// number szamlazz.hu *reports* is carried in; the worker's response types
 /// echo numbers as plain strings.
+/// Exact read selectors instead take [`crate::contract::ProviderDocumentNumber`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InvoiceNumber(String);
 

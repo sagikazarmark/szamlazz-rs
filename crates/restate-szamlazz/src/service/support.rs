@@ -641,16 +641,27 @@ where
     Fut: Future<Output = Result<T, Unanswered>> + Send + 'ctx,
     T: Journaled + Send + 'static,
 {
+    run_reading_with_policy(ctx, name, exec.config.read.run_retry_policy(), exec, f).await
+}
+
+/// A read with an operation-specific run policy and the common read fault mapping.
+pub(in crate::service) async fn run_reading_with_policy<'ctx, C, T, F, Fut>(
+    ctx: &C,
+    name: impl Into<String>,
+    policy: RunRetryPolicy,
+    exec: &Execution,
+    f: F,
+) -> Result<T, Fault>
+where
+    C: RunCtx<'ctx>,
+    F: FnOnce(Arc<Gateway>) -> Fut + Send + 'ctx,
+    Fut: Future<Output = Result<T, Unanswered>> + Send + 'ctx,
+    T: Journaled + Send + 'static,
+{
     let name = name.into();
-    run_operating(
-        ctx,
-        name.clone(),
-        exec.config.read.run_retry_policy(),
-        exec,
-        f,
-    )
-    .await
-    .map_err(|error| read_exhausted(&name, &error))
+    run_operating(ctx, name.clone(), policy, exec, f)
+        .await
+        .map_err(|error| read_exhausted(&name, &error))
 }
 
 /// A **best-effort** read under the read policy: [`run_reading`] for a step
