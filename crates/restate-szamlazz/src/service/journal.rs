@@ -177,11 +177,34 @@ fn entries() -> Vec<Entry> {
         },
     };
     all.extend(entries_of(vec![()], &single()));
+    let mut proforma = marker.clone();
+    proforma.execution_contract =
+        Some(crate::contract::recovery::OrdinaryExecutionContract::RequestResponseProformaV1);
+    proforma.operation = WriteOperation::Create {
+        kind: crate::identity::IssuedKind::Proforma,
+        expected_number: None,
+        corrected_number: None,
+    };
+    let mut deletion = marker.clone();
+    deletion.execution_contract = Some(
+        crate::contract::recovery::OrdinaryExecutionContract::RequestResponseDeleteV1 {
+            mode: crate::contract::DeleteMode::NamedTarget,
+            force: true,
+            document_id: 123,
+        },
+    );
+    deletion.operation = WriteOperation::Delete {
+        number: "D-1".into(),
+    };
     all.extend(entries_of(
-        vec![super::recovery::OrdinaryIntent::new(marker.clone())],
+        vec![
+            super::recovery::OrdinaryIntent::new(marker.clone()),
+            super::recovery::OrdinaryIntent::new(proforma.clone()),
+            super::recovery::OrdinaryIntent::new(deletion.clone()),
+        ],
         &single(),
     ));
-    all.extend(entries_of(vec![marker], &single()));
+    all.extend(entries_of(vec![marker, proforma, deletion], &single()));
     all.extend(entries_of(
         vec![RecoveryResponse {
             token: "inv-owner".into(),

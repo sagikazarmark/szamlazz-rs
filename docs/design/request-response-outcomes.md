@@ -40,8 +40,38 @@ below.
 
 ## Admission and support
 
+### Proforma creation and deletion extension (agreed)
+
+The user accepts unfinished-run replay for proforma create/delete, on both hosts
+under the same explicit experimental opt-in. Creation refreshes its own holder,
+then ordinary/prepayment/final exclusivity and the order hint. Provider per-type
+duplicate-order checking is a prerequisite, not a proven atomic guarantee. A
+visible matching proforma settles creation; an invisible prior create may be
+resubmitted after fresh checks. A consumed proforma cannot be recovered as creation
+evidence from invoice absence or linkage alone. Recorded uncertainty stays read-only.
+
+Deletion retains exact expected number, provider id, mode and force in a distinct
+execution-contract marker. Each executing open run verifies the same proforma by
+number, Order association, type, provider id and current credit entries; force
+bypasses only the credit-entry guard. Namespace-owned mode also refreshes the
+namespace slot, refusing a changed holder. Named mode never selects or deletes a
+coexisting namespace holder. A positive deletion acknowledgement clears after
+recording. Post-admission absence (query miss or code335), refusals, failed guards,
+credentials/init failures and lost answers retain uncertainty, even on an apparent
+first execution. They cannot settle a potentially effective earlier send. Repeated
+open-run deletion is allowed only while the exact target still passes fresh checks;
+positive completion does not fence delayed old execution or external changes.
+
+Before admission the existing paid/ownership/expected-target conflicts and absence
+remain settled no-send outcomes. After recorded uncertainty, deletion cannot be
+settled by document queries: pause/resume is read-only and operator recovery needs
+audited completion or non-execution evidence for the exact marker. Kill/cancellation
+retain the marker. Known new contracts are recoverable; old or unknown prepare
+results never grant permission for the new operation. Other mutation types remain
+outside this extension.
+
 The explicit `test-util` opt-in on **both** Order and Agent is for an isolated
-experimental endpoint. It permits ordinary `Order.create_invoice` including reissue
+experimental endpoint. It permits `create_proforma`, exact-target `delete_proforma`, ordinary `Order.create_invoice` including reissue
 and pinned conversion, evidence-carrying `recover`, and reads (`get`,
 `observe_unresolved`, Agent `query`, `query_taxpayer`, `check_account`). All other
 mutations return the existing `invalid_input` fault before provider I/O.

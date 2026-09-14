@@ -1,6 +1,6 @@
 # Actual Order/Agent on Cloudflare Workers (#247)
 
-An **experimental**, explicitly selected endpoint for ordinary invoices (including
+An **experimental**, explicitly selected endpoint for proforma creation/deletion and ordinary invoices (including
 exact-target reissue and pinned proforma conversion), reads and operator recovery.
 It embeds the real services, including input/money validation, account
 resolution, fresh guards, unresolved markers and read-only reconciliation.
@@ -131,6 +131,8 @@ unsigned discovery refusal. The Rust test uses real Restate ingress to exercise:
   evidence, active cancellation, and no-effect kill followed by a blocked successor.
 - Unsupported mutations refused before provider I/O and journal privacy.
 - Explicit document queries preserve buyer/VAT facts and decimals beyond JS integer precision.
+- Proforma creation and interrupted deletion, with absence retaining the marker
+  across pause/resume/kill until audited recovery.
 
 The native buffered suite additionally covers invisible first effects with/without
 fake deduplication and deliberately surviving old execution. Those remain accepted

@@ -70,16 +70,19 @@ async fn serve(
         .experimental_request_response()
         .into_service_definition();
     #[cfg(feature = "acceptance-tests")]
-    let order = order.options(
-        restate_sdk::endpoint::ServiceOptions::default().handler(
-            "create_invoice",
-            restate_sdk::endpoint::HandlerOptions::default()
-                .retry_policy_initial_interval(std::time::Duration::from_millis(100))
-                .retry_policy_max_interval(std::time::Duration::from_millis(100))
-                .retry_policy_max_attempts(2)
-                .retry_policy_pause_on_max_attempts(),
-        ),
-    );
+    let order = {
+        let policy = restate_sdk::endpoint::HandlerOptions::default()
+            .retry_policy_initial_interval(std::time::Duration::from_millis(100))
+            .retry_policy_max_interval(std::time::Duration::from_millis(100))
+            .retry_policy_max_attempts(2)
+            .retry_policy_pause_on_max_attempts();
+        order.options(
+            restate_sdk::endpoint::ServiceOptions::default()
+                .handler("create_invoice", policy.clone())
+                .handler("create_proforma", policy.clone())
+                .handler("delete_proforma", policy),
+        )
+    };
     // Required: a trusted ingress gateway selects scope, and only the signed
     // Restate runtime can address this endpoint. The ingress gateway must
     // separately authorize operator access to observe_unresolved and recover.

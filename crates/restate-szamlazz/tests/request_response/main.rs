@@ -4,6 +4,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 mod extensions;
+mod proformas;
 
 use axum::{Router, body::Body, extract::State};
 use http_body_util::{BodyExt as _, Full};
@@ -200,7 +201,12 @@ fn endpoint(provider: &str, lab: Arc<Lab>, worker: usize) -> Endpoint {
                 .experimental_request_response()
                 .with_write_observer(Arc::new(Observer { lab, worker }))
                 .into_service_definition()
-                .options(ServiceOptions::default().handler("create_invoice", policy)),
+                .options(
+                    ServiceOptions::default()
+                        .handler("create_invoice", policy.clone())
+                        .handler("create_proforma", policy.clone())
+                        .handler("delete_proforma", policy),
+                ),
         )
         .bind(Agent::from_parts(accounts, config).experimental_request_response())
         .build()
@@ -338,12 +344,10 @@ async fn pause(server: &Restate, id: &str) {
 async fn admission_cases(server: &Restate, mock: &wiremock::MockServer, lab: &Arc<Lab>) {
     let before = mock.received_requests().await.expect("requests").len();
     for handler in [
-        "create_proforma",
         "create_prepayment",
         "create_final",
         "correct_invoice",
         "storno_invoice",
-        "delete_proforma",
     ] {
         let response = server
             .invoke(
@@ -749,6 +753,10 @@ async fn e2e_request_response_actual_order() {
         .await;
     assert_eq!(response.body["outcome"], "reconciled", "{response:?}");
     extensions::reissue(&server, &mock).await;
+    proformas::create(&server, &mock).await;
+    proformas::delete(&server, &mock).await;
+    proformas::guards(&server, &mock).await;
+    proformas::interruptions(&server, &mock, &lab).await;
     extensions::conversion(&server, &mock).await;
     extensions::recovery(&server, &mock).await;
     extensions::marker_compatibility(&server, &mock).await;

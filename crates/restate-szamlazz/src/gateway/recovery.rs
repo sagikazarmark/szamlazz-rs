@@ -208,7 +208,9 @@ impl Gateway {
     {
         use crate::identity::{DocumentKind, IssuedKind};
         // Defence in depth: this seam is never a blanket permission for kinds.
-        if request.kind != IssuedKind::Invoice || request.corrected_number.is_some() {
+        if !matches!(request.kind, IssuedKind::Invoice | IssuedKind::Proforma)
+            || request.corrected_number.is_some()
+        {
             return WriteResult::unresolved("unsupported experimental ordinary intent");
         }
         // After admission a different matching holder is replacement evidence,
@@ -245,11 +247,20 @@ impl Gateway {
             return WriteResult::unresolved("invalid ordinary namespace");
         };
         let proforma = request.proforma_number();
-        for kind in [
-            DocumentKind::Prepayment,
-            DocumentKind::Final,
-            DocumentKind::Proforma,
-        ] {
+        let guarded = if request.kind == IssuedKind::Proforma {
+            [
+                DocumentKind::Invoice,
+                DocumentKind::Prepayment,
+                DocumentKind::Final,
+            ]
+        } else {
+            [
+                DocumentKind::Prepayment,
+                DocumentKind::Final,
+                DocumentKind::Proforma,
+            ]
+        };
+        for kind in guarded {
             let id = ExternalId::for_kind(&namespace, request.order, kind);
             match self.lookup_ours(&id, request.order, kind.into()).await {
                 Ok(super::OwnershipOutcome::Absent | super::OwnershipOutcome::Reversed(_)) => {}

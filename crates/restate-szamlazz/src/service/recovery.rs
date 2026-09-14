@@ -25,6 +25,29 @@ use crate::identity::{ExternalId, OrderKey};
 
 const STATE: &str = "unresolved-write";
 
+#[cfg(feature = "test-util")]
+#[derive(Clone, Copy)]
+enum ReplayWrite {
+    Create,
+    Delete,
+}
+
+#[cfg(feature = "test-util")]
+impl ReplayWrite {
+    const fn step(self) -> &'static str {
+        match self {
+            Self::Create => "ordinary",
+            Self::Delete => "proforma-delete",
+        }
+    }
+    const fn write_name(self) -> &'static str {
+        match self {
+            Self::Create => "create-ordinary-request-response",
+            Self::Delete => "delete-proforma-request-response",
+        }
+    }
+}
+
 /// A distinct serialized run result as well as state discriminator. Run names
 /// alone are not an exceptional-replay fence: an old prepare-write result must
 /// fail decoding rather than become ordinary resend permission.
@@ -44,7 +67,7 @@ pub(super) struct OrdinaryIntent {
 impl<'de> serde::Deserialize<'de> for OrdinaryIntent {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         let marker = UnresolvedWrite::deserialize(de)?;
-        if marker.execution_contract.is_none() {
+        if !valid_execution_contract(&marker) || marker.execution_contract.is_none() {
             return Err(serde::de::Error::custom(
                 "ordinary intent requires execution contract",
             ));
@@ -59,8 +82,11 @@ impl OrdinaryIntent {
         allow(dead_code, reason = "experimental constructor")
     )]
     pub(super) fn new(mut marker: UnresolvedWrite) -> Self {
-        marker.execution_contract =
-            Some(crate::contract::recovery::OrdinaryExecutionContract::RequestResponseOrdinaryV1);
+        if marker.execution_contract.is_none() {
+            marker.execution_contract = Some(
+                crate::contract::recovery::OrdinaryExecutionContract::RequestResponseOrdinaryV1,
+            );
+        }
         Self { marker }
     }
 }
@@ -313,17 +339,10 @@ fn validate_completion(
 
 fn decode_marker(raw: &[u8], scope: Option<&str>, key: &str) -> Option<UnresolvedWrite> {
     let marker: UnresolvedWrite = serde_json::from_slice(raw).ok()?;
+    if !valid_execution_contract(&marker) {
+        return None;
+    }
     if marker.execution_contract.is_some() {
-        if !matches!(
-            marker.operation,
-            WriteOperation::Create {
-                kind: crate::identity::IssuedKind::Invoice,
-                corrected_number: None,
-                ..
-            }
-        ) {
-            return None;
-        }
         if marker.proforma_number.as_ref().is_some_and(|n| {
             n.parse::<crate::contract::ProviderDocumentNumber>()
                 .is_err()
@@ -408,6 +427,34 @@ fn decode_marker(raw: &[u8], scope: Option<&str>, key: &str) -> Option<Unresolve
     Some(marker)
 }
 
+fn valid_execution_contract(marker: &UnresolvedWrite) -> bool {
+    use crate::contract::recovery::OrdinaryExecutionContract as Contract;
+    use crate::identity::IssuedKind;
+    match (&marker.execution_contract, &marker.operation) {
+        (
+            Some(Contract::RequestResponseOrdinaryV1),
+            WriteOperation::Create {
+                kind: IssuedKind::Invoice,
+                corrected_number: None,
+                ..
+            },
+        ) => true,
+        (
+            Some(Contract::RequestResponseProformaV1),
+            WriteOperation::Create {
+                kind: IssuedKind::Proforma,
+                corrected_number: None,
+                ..
+            },
+        )
+        | (None, _)
+        | (Some(Contract::RequestResponseDeleteV1 { .. }), WriteOperation::Delete { .. }) => {
+            marker.proforma_number.is_none()
+        }
+        _ => false,
+    }
+}
+
 pub(super) async fn guard(ctx: &ObjectContext<'_>) -> Result<(), HandlerError> {
     if ctx
         .get::<bytes::Bytes>(STATE)
@@ -432,7 +479,17 @@ impl Execution {
         external_id: &ExternalId,
     ) -> Result<WriteResult, HandlerError> {
         let marker = UnresolvedWrite {
-            execution_contract: None,
+            execution_contract: Some(match request.operation() {
+                WriteOperation::Create {
+                    kind: crate::identity::IssuedKind::Proforma,
+                    ..
+                } => {
+                    crate::contract::recovery::OrdinaryExecutionContract::RequestResponseProformaV1
+                }
+                _ => {
+                    crate::contract::recovery::OrdinaryExecutionContract::RequestResponseOrdinaryV1
+                }
+            }),
             proforma_number: request.proforma_number().map(str::to_owned),
             version: MarkerVersion,
             token: ctx.invocation_id().to_owned(),
@@ -447,13 +504,119 @@ impl Execution {
             credential_ref: self.account.credential_ref.to_string(),
             operation: request.operation(),
         };
+        self.request_response_write(
+            ctx,
+            order,
+            external_id,
+            marker,
+            ReplayWrite::Create,
+            move |gateway, marker| async move {
+                if marker.operation != request.operation()
+                    || marker.proforma_number.as_deref() != request.proforma_number()
+                {
+                    return WriteResult::unresolved(
+                        "outbound request differs from retained issuance intent",
+                    );
+                }
+                gateway
+                    .ordinary_request_response(request, || {
+                        self.checkpoint(order, WriteCheckpoint::OrdinaryGuardsPassed)
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
+    #[cfg(feature = "test-util")]
+    pub(super) async fn request_response_delete(
+        &self,
+        ctx: &ObjectContext<'_>,
+        order: &OrderKey,
+        external_id: &ExternalId,
+        found: Box<crate::gateway::FoundDocument>,
+        request: crate::contract::DeleteProformaRequest,
+    ) -> Result<WriteResult, HandlerError> {
+        let contract =
+            crate::contract::recovery::OrdinaryExecutionContract::RequestResponseDeleteV1 {
+                mode: request.mode,
+                force: request.force,
+                document_id: found.document_id,
+            };
+        let marker = UnresolvedWrite {
+            execution_contract: Some(contract),
+            proforma_number: None,
+            version: MarkerVersion,
+            token: ctx.invocation_id().to_owned(),
+            owner_invocation: ctx.invocation_id().to_owned(),
+            created_at: String::new(),
+            scope: ctx.scope().map(str::to_owned),
+            order: order.clone(),
+            namespace: self.config.namespace.clone(),
+            external_id: external_id.as_str().to_owned(),
+            account_id: self.account.id.to_string(),
+            endpoint: self.account.endpoint.as_str().to_owned(),
+            credential_ref: self.account.credential_ref.to_string(),
+            operation: WriteOperation::Delete {
+                number: found.number.clone(),
+            },
+        };
+        self.request_response_write(ctx,order,external_id,marker,ReplayWrite::Delete,move |gateway,marker| async move {
+            if marker.execution_contract!=Some(contract) || marker.operation!=(WriteOperation::Delete {number:found.number.clone()}) {
+                return WriteResult::unresolved("deletion request differs from retained intent");
+            }
+            if request.mode==crate::contract::DeleteMode::NamespaceOwned {
+                match gateway.lookup_ours(external_id,order,crate::identity::IssuedKind::Proforma).await {
+                    Ok(crate::gateway::OwnershipOutcome::Live(current)|crate::gateway::OwnershipOutcome::Reversed(current)) if current.number==found.number && current.document_id==found.document_id => {},
+                    Ok(crate::gateway::OwnershipOutcome::CredentialsRejected(answer)) => { answer.warn_credentials_rejected(external_id.namespace());return WriteResult::unresolved(format!("deletion namespace credentials rejected: {}",answer.code)); },
+                    Ok(crate::gateway::OwnershipOutcome::Absent)=>return WriteResult::unresolved("deletion namespace holder absent; absence does not settle deletion"),
+                    Ok(crate::gateway::OwnershipOutcome::Api(answer))=>return WriteResult::unresolved(format!("deletion namespace vendor code {}",answer.code)),
+                    Err(cause)=>return WriteResult::unresolved(format!("deletion namespace query unanswered: {cause}")),
+                    _=>return WriteResult::unresolved("deletion namespace target changed or collided"),
+                }
+            }
+            match gateway.delete_proforma(&found,order,request.force).await {
+                crate::gateway::DeleteOutcome::Deleted=>WriteResult::Delete(crate::gateway::DeleteOutcome::Deleted),
+                crate::gateway::DeleteOutcome::CredentialsRejected(answer)=>{answer.warn_credentials_rejected(external_id.namespace());WriteResult::unresolved(format!("deletion credentials rejected: {}",answer.code))},
+                crate::gateway::DeleteOutcome::AlreadyGone=>WriteResult::unresolved("proforma reported absent; absence does not settle earlier deletion"),
+                crate::gateway::DeleteOutcome::Paid=>WriteResult::unresolved("fresh deletion paid guard refused; earlier deletion remains unresolved"),
+                crate::gateway::DeleteOutcome::TargetChanged=>WriteResult::unresolved("fresh deletion target changed; earlier deletion remains unresolved"),
+                crate::gateway::DeleteOutcome::Api(answer)=>WriteResult::unresolved(format!("deletion guard vendor code {}",answer.code)),
+                crate::gateway::DeleteOutcome::Rejected(rejection)=>WriteResult::unresolved(format!("deletion refused: {}; earlier execution remains unresolved",rejection.code)),
+                crate::gateway::DeleteOutcome::Inconclusive(answer)=>WriteResult::unresolved(format!("inconclusive deletion code {}",answer.code)),
+                crate::gateway::DeleteOutcome::GuardFailed(cause)=>WriteResult::unresolved(format!("deletion guard unanswered: {cause}")),
+                crate::gateway::DeleteOutcome::Lost(cause)=>WriteResult::unresolved(format!("deletion answer lost: {cause}")),
+            }
+        }).await
+    }
+
+    #[cfg(feature = "test-util")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one shared durable boundary for the two approved mutation contracts"
+    )]
+    async fn request_response_write<F, Fut>(
+        &self,
+        ctx: &ObjectContext<'_>,
+        order: &OrderKey,
+        external_id: &ExternalId,
+        marker: UnresolvedWrite,
+        operation: ReplayWrite,
+        write: F,
+    ) -> Result<WriteResult, HandlerError>
+    where
+        F: FnOnce(Arc<Gateway>, UnresolvedWrite) -> Fut + Send,
+        Fut: Future<Output = WriteResult> + Send,
+    {
+        let step = operation.step();
+        let expected_contract = marker.execution_contract;
         let intent = ctx
             .run(|| async move {
                 let mut marker = marker;
                 marker.created_at = jiff::Timestamp::now().to_string();
                 Ok(journal(OrdinaryIntent::new(marker)))
             })
-            .name("prepare-ordinary-write")
+            .name(format!("prepare-{step}-write"))
             .await
             .map_err(read_fault)?
             .0;
@@ -465,7 +628,10 @@ impl Execution {
             .with_run_cause(&error)
             .about(
                 order,
-                Some(crate::identity::IssuedKind::Invoice),
+                match marker.operation {
+                    WriteOperation::Create { kind, .. } => Some(kind),
+                    _ => Some(crate::identity::IssuedKind::Proforma),
+                },
                 external_id,
             )
         };
@@ -475,36 +641,28 @@ impl Execution {
         // Awaited acknowledgement of commands preceding the barrier; replay
         // needs no execution-local arm permit to make progress.
         ctx.run(|| async { Ok(()) })
-            .name("ordinary-marker-committed")
+            .name(format!("{step}-marker-committed"))
             .await
             .map_err(uncertain)?;
         let result = ctx
             .run(|| async {
                 super::prologue::mark_fresh_work();
-                let result = if marker.operation != request.operation()
-                    || marker.proforma_number.as_deref() != request.proforma_number()
-                {
-                    WriteResult::unresolved(
-                        "outbound request differs from retained ordinary intent",
-                    )
-                } else {
+                let result = if marker.execution_contract == expected_contract {
                     match self.gateway().await {
-                        Ok(gateway) => {
-                            gateway
-                                .ordinary_request_response(request, || {
-                                    self.checkpoint(order, WriteCheckpoint::OrdinaryGuardsPassed)
-                                })
-                                .await
-                        }
+                        Ok(gateway) => write(gateway, marker.clone()).await,
                         Err(_) => WriteResult::unresolved(
                             "pinned account unavailable inside ordinary write",
                         ),
                     }
+                } else {
+                    WriteResult::unresolved(
+                        "outbound request differs from retained execution contract",
+                    )
                 };
                 self.checkpoint(order, WriteCheckpoint::Sent).await;
                 Ok(journal(result))
             })
-            .name("create-ordinary-request-response")
+            .name(operation.write_name())
             .retry_policy(RunRetryPolicy::new().max_attempts(1))
             .await
             .map_err(uncertain)?
@@ -519,7 +677,7 @@ impl Execution {
                 }
                 self.checkpoint(order, WriteCheckpoint::Reconciled).await;
                 Ok(journal(result))
-            }).name("reconcile-ordinary-write").await.map_err(uncertain)?.0
+            }).name(format!("reconcile-{step}-write")).await.map_err(uncertain)?.0
         } else {
             result
         };

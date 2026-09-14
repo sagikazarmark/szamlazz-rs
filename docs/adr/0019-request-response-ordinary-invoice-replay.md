@@ -184,7 +184,28 @@ permission. Exceptional replay still requires invocation-specific review.
 This extends the initial-slice exclusions above, not the remaining operation kinds
 or production rollout/migration. The explicit opt-in remains on either host.
 
-### Host and transport
+### Proforma lifecycle extension (agreed)
+
+The user accepts unfinished-run resubmission for shared `create_proforma` and
+`delete_proforma` in the experimental endpoint. Creation retains the same per-type
+duplicate-order-checking dependency and refreshes the invoice/prepayment/final
+guards before any open-run resend. Deletion repeats only after fresh verification
+of the exact number/provider id/Order/type and paid guard; namespace-owned mode
+also requires the same external-id holder. Force bypasses only the paid guard.
+An acknowledged deletion clears after its result is recorded. Absence, code335,
+later refusals, changed guards or unavailable initialization after admission do
+not settle an earlier execution and retain read-only uncertainty. Queries cannot
+establish deletion: operator recovery requires audited completion/non-execution.
+Positive completion accepts residual delayed-effect risk; it is not a fence.
+
+Proforma creates carry `request_response_proforma_v1`; deletion carries the closed
+`request_response_delete_v1` object with mode, force and document_id, beside the
+marker's existing exact target. Older deployments reject these contracts. The
+shared prepare-result wrapper validates contract/operation pairing; replay also
+compares the pinned contract before executing. Legacy journals gain no send
+permission. This extends the operation subset, not production migration approval.
+
+### Host and transport behavior
 
 The [workers-rs example](../../examples/workers/README.md) now builds and runs the
 actual restricted services in workerd with the pinned interim SDK fix. Signed,

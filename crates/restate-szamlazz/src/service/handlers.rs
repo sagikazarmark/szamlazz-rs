@@ -65,8 +65,6 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<CreateRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        #[cfg(feature = "test-util")]
-        self.require_supported_mutation()?;
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
         super::recovery::guard(&ctx).await?;
@@ -288,8 +286,6 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<DeleteProformaRequest>,
     ) -> HandlerResult<Json<DeleteProformaResponse>> {
-        #[cfg(feature = "test-util")]
-        self.require_supported_mutation()?;
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
         super::recovery::guard(&ctx).await?;

@@ -433,12 +433,10 @@ async fn e2e_workers_signed_scoped_ordinary() {
     );
     let before = mock.received_requests().await.expect("requests").len();
     for handler in [
-        "create_proforma",
         "create_prepayment",
         "create_final",
         "correct_invoice",
         "storno_invoice",
-        "delete_proforma",
     ] {
         let response = server
             .invoke(
@@ -667,6 +665,139 @@ async fn e2e_workers_signed_scoped_ordinary() {
     assert_eq!(query.body["by_vat_rate"][0]["gross"], "9007199254740993.01");
     assert_eq!(query.body["by_vat_rate"][0]["vat_type"], "AAM");
     mock.verify().await;
+    proforma_lifecycle(&server, &mock, uri).await;
     server.finish().await;
     host.finish();
+}
+
+async fn proforma_lifecycle(
+    server: &restate_e2e_harness::Restate,
+    mock: &wiremock::MockServer,
+    uri: &str,
+) {
+    common::number_query("D-NAMED-WORKER")
+        .respond_with(common::Doc::of("D-NAMED-WORKER", "D", "NAMED-WORKER-DELETE").response())
+        .with_priority(1)
+        .mount(mock)
+        .await;
+    common::delete_of("D-NAMED-WORKER")
+        .respond_with(common::proforma_deleted())
+        .expect(1)
+        .mount(mock)
+        .await;
+    let response = server
+        .invoke(
+            &Call::object("Szamlazz.Order", "NAMED-WORKER-DELETE", "delete_proforma")
+                .scoped("alpha"),
+            Some(&json!({"expected_number":"D-NAMED-WORKER","mode":"named_target"})),
+            None,
+        )
+        .await;
+    assert_eq!(response.body["outcome"], "deleted", "{response:?}");
+    let created = Arc::new(AtomicBool::new(false));
+    let deleted = Arc::new(AtomicBool::new(false));
+    let c = created.clone();
+    let d = deleted.clone();
+    common::external_id_query("workers:PROFORMA:proforma")
+        .respond_with(move |_: &wiremock::Request| {
+            if c.load(Ordering::SeqCst) && !d.load(Ordering::SeqCst) {
+                common::Doc::of("D-WORKER", "D", "PROFORMA").response()
+            } else {
+                common::not_found()
+            }
+        })
+        .with_priority(1)
+        .mount(mock)
+        .await;
+    let c = created.clone();
+    common::create_for("PROFORMA")
+        .respond_with(move |_: &wiremock::Request| {
+            c.store(true, Ordering::SeqCst);
+            common::created("D-WORKER", "1000", "1270")
+        })
+        .expect(1)
+        .mount(mock)
+        .await;
+    let mut body = request();
+    body["options"] = json!({});
+    let create = server
+        .invoke(
+            &Call::object("Szamlazz.Order", "PROFORMA", "create_proforma").scoped("alpha"),
+            Some(&body),
+            None,
+        )
+        .await;
+    assert_eq!(create.body["outcome"], "issued", "{create:?}");
+    common::number_query("D-WORKER")
+        .respond_with(common::Doc::of("D-WORKER", "D", "PROFORMA").response())
+        .with_priority(1)
+        .mount(mock)
+        .await;
+    let d = deleted.clone();
+    common::delete_of("D-WORKER")
+        .respond_with(move |_: &wiremock::Request| {
+            d.store(true, Ordering::SeqCst);
+            common::proforma_deleted().set_delay(Duration::from_secs(20))
+        })
+        .expect(1)
+        .mount(mock)
+        .await;
+    let call = Call::object("Szamlazz.Order", "PROFORMA", "delete_proforma").scoped("alpha");
+    let body = json!({"expected_number":"D-WORKER"});
+    let started = server
+        .invoke(&call.send(), Some(&body), Some("delete-worker"))
+        .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !deleted.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("delete sent");
+    common::http_client()
+        .post(format!("{uri}/__interrupt"))
+        .send()
+        .await
+        .expect("interrupt")
+        .error_for_status()
+        .expect("interrupt status");
+    server
+        .admin()
+        .await_status(started.invocation_id(), &["paused"])
+        .await;
+    let observed = server
+        .invoke(
+            &Call::object("Szamlazz.Order", "PROFORMA", "observe_unresolved").scoped("alpha"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(observed.body["state"], "unresolved");
+    server.admin().resume(started.invocation_id()).await;
+    server
+        .admin()
+        .await_status(started.invocation_id(), &["paused"])
+        .await;
+    server.admin().kill(started.invocation_id()).await;
+    server
+        .admin()
+        .await_status(started.invocation_id(), &["completed"])
+        .await;
+    assert_eq!(
+        server
+            .invoke(&call, Some(&body), Some("new-delete"))
+            .await
+            .status,
+        500
+    );
+    let evidence = json!({"operator":"operator","marker":observed.body["marker"],"evidence":{"type":"completed","audit_reference":"INC-WORKER-DELETE","completion":{"type":"deleted","number":"D-WORKER"},"completed_and_cannot_execute_later":true}});
+    let response = server
+        .invoke(
+            &Call::object("Szamlazz.Order", "PROFORMA", "recover").scoped("alpha"),
+            Some(&evidence),
+            None,
+        )
+        .await;
+    assert_eq!(response.status, 200, "{response:?}");
+    mock.verify().await;
 }

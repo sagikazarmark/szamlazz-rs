@@ -27,9 +27,13 @@ are computed or validated against caller assertions, domain outcomes are returne
 
 An isolated **#247 RequestResponse experiment** is available behind `test-util`,
 explicitly selected on both services with `.experimental_request_response()`.
-It supports ordinary invoices including exact-target reissue and pinned proforma
-conversion, reads and evidence-carrying recovery; it requires operator-confirmed
+It supports proforma creation and exact-target deletion, ordinary invoices including
+exact-target reissue and pinned proforma conversion, reads and evidence-carrying recovery; it requires operator-confirmed
 provider duplicate-order checking, and accepts unfinished-run resubmission risk.
+Proforma deletion clears automatically only on an acknowledged deletion; a later
+absence/refusal or failed guard retains uncertainty. Named deletion keeps its exact
+target; namespace-owned deletion also refreshes the slot. Recovery requires audited
+deletion or non-execution evidence, never absence alone.
 Recorded uncertainty stays read-only; other mutations are refused. See the
 [actual-service experiment](tests/request_response/README.md) and
 [outcome/clearance table](../../docs/design/request-response-outcomes.md).

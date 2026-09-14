@@ -4,9 +4,9 @@ use super::{Agent, Order, support::Fault};
 
 impl Order {
     /// Enable the isolated `RequestResponse` ordinary-issuance experiment (#247).
-    /// Requires enabled provider duplicate-order checking. Ordinary invoices,
+    /// Requires enabled provider per-type duplicate-order checking. Proformas and ordinary invoices,
     /// including exact-target reissue and pinned proforma conversion, reads and
-    /// evidence-carrying recovery are supported. Other mutations are refused
+    /// evidence-carrying recovery and exact-target proforma deletion are supported. Other mutations are refused
     /// before provider I/O. Matching issuance does not prove uniqueness
     /// or exclude a delayed old execution. Not a production deployment option.
     #[must_use]

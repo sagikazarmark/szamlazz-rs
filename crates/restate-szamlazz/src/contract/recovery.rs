@@ -118,13 +118,77 @@ pub struct UnresolvedWrite {
 }
 }
 
-/// The ordinary replay-risk contract; never inferred from the hosting target.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The approved replay-risk contracts; never inferred from the hosting target.
+/// The type name retains the first ordinary-invoice experiment's Rust API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum OrdinaryExecutionContract {
     /// Ordinary issuance with fresh checks before unfinished-run resubmission.
     #[serde(rename = "request_response_ordinary_v1")]
     RequestResponseOrdinaryV1,
+    /// Proforma issuance with fresh invoice-family guards on unfinished replay.
+    #[serde(rename = "request_response_proforma_v1")]
+    RequestResponseProformaV1,
+    /// Exact-target deletion; only an acknowledged deletion clears automatically.
+    #[serde(rename = "request_response_delete_v1")]
+    RequestResponseDeleteV1 {
+        /// Selection mode retained before sending.
+        mode: super::DeleteMode,
+        /// Whether the caller explicitly bypassed the credit-entry guard.
+        force: bool,
+        /// Provider id of the verified target, checked on every open execution.
+        document_id: i64,
+    },
+}
+
+impl<'de> Deserialize<'de> for OrdinaryExecutionContract {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = OrdinaryExecutionContract;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a known execution contract")
+            }
+            fn visit_str<E: serde::de::Error>(self, token: &str) -> Result<Self::Value, E> {
+                match token {
+                    "request_response_ordinary_v1" => {
+                        Ok(OrdinaryExecutionContract::RequestResponseOrdinaryV1)
+                    }
+                    "request_response_proforma_v1" => {
+                        Ok(OrdinaryExecutionContract::RequestResponseProformaV1)
+                    }
+                    _ => Err(E::custom("unknown execution contract")),
+                }
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<Self::Value, M::Error> {
+                if map.next_key::<String>()?.as_deref() != Some("request_response_delete_v1") {
+                    return Err(serde::de::Error::custom("unknown execution contract"));
+                }
+                let payload: DeleteExecution = map.next_value()?;
+                if map.next_key::<String>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "execution contract requires one variant",
+                    ));
+                }
+                Ok(OrdinaryExecutionContract::RequestResponseDeleteV1 {
+                    mode: payload.mode,
+                    force: payload.force,
+                    document_id: payload.document_id,
+                })
+            }
+        }
+        de.deserialize_any(Visitor)
+    }
+}
+
+super::object::object_input! {
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteExecution { mode:super::DeleteMode, force:bool, document_id:i64 }
 }
 
 fn exact_order_key<'de, D: Deserializer<'de>>(de: D) -> Result<OrderKey, D::Error> {

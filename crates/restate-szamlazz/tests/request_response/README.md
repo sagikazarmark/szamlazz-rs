@@ -1,5 +1,12 @@
 # Actual Order RequestResponse experiment (#247)
 
+The proforma lifecycle extension covers create/delete through the same Order,
+including interrupted visible/invisible creates, invoice-family guard changes,
+paid/force and named deletion, interrupted deletion with an absent or still-present
+target, post-interruption paid/refusal answers and recorded uncertainty. Resume
+stays read-only; only acknowledged deletion or audited recovery clears deletion
+uncertainty. No document query is negative or positive deletion settlement.
+
 Run the fake-provider suite against real Restate (tested with 1.7.8 / SDK 0.12.0):
 
 ```sh
