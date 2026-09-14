@@ -438,7 +438,7 @@ async fn e2e_workers_signed_scoped_ordinary() {
         let response = server
             .invoke(
                 &Call::object("Szamlazz.Order", "BLOCKED", handler).scoped("alpha"),
-                Some(&json!({})),
+                Some(&json!({"invoice_number":"BASE-1","correction_id":"c1","document":request()["document"]})),
                 None,
             )
             .await;
@@ -447,7 +447,7 @@ async fn e2e_workers_signed_scoped_ordinary() {
             response.body["message"]
                 .as_str()
                 .expect("fault")
-                .contains("mutation unsupported"),
+                .contains("corrective issuance is unsupported"),
             "{handler}: {response:?}"
         );
     }

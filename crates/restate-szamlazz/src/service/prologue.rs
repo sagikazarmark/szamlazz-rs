@@ -60,8 +60,6 @@ pub(super) struct Execution {
     gateway: Arc<tokio::sync::OnceCell<Arc<Gateway>>>,
     pub(super) config: WorkerConfig,
     #[cfg(feature = "test-util")]
-    pub(super) experimental_request_response: bool,
-    #[cfg(feature = "test-util")]
     pub(super) write_observer: Option<Arc<dyn super::recovery::WriteObserver>>,
 }
 
@@ -72,8 +70,6 @@ impl Execution {
             accounts,
             config,
             gateway: Arc::default(),
-            #[cfg(feature = "test-util")]
-            experimental_request_response: false,
             #[cfg(feature = "test-util")]
             write_observer: None,
         }

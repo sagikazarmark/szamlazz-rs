@@ -191,9 +191,9 @@ fn endpoint(provider: &str, lab: Arc<Lab>, worker: usize) -> Endpoint {
             lab: lab.clone(),
         }),
     );
-    let config = WorkerConfig::new("rr".parse().expect("namespace"))
-        .validate()
-        .expect("config");
+    let mut config = WorkerConfig::new("rr".parse().expect("namespace"));
+    config.order_execution = restate_szamlazz::config::OrderExecution::ReplayEnabled;
+    let config = config.validate().expect("config");
     let policy = HandlerOptions::default()
         .retry_policy_initial_interval(Duration::from_millis(100))
         .retry_policy_max_interval(Duration::from_millis(100))
@@ -202,7 +202,6 @@ fn endpoint(provider: &str, lab: Arc<Lab>, worker: usize) -> Endpoint {
     Endpoint::builder()
         .bind(
             Order::from_parts(accounts.clone(), config.clone())
-                .experimental_request_response()
                 .with_write_observer(Arc::new(Observer { lab, worker }))
                 .into_service_definition()
                 .options(
@@ -217,7 +216,6 @@ fn endpoint(provider: &str, lab: Arc<Lab>, worker: usize) -> Endpoint {
         )
         .bind(
             Agent::from_parts(accounts, config)
-                .experimental_request_response()
                 .into_service_definition()
                 .options(
                     ServiceOptions::default().handler(
@@ -367,7 +365,7 @@ async fn admission_cases(server: &Restate, mock: &wiremock::MockServer, lab: &Ar
         let response = server
             .invoke(
                 &Call::object("Szamlazz.Order", "unsupported", handler),
-                Some(&json!({})),
+                Some(&json!({"invoice_number":"BASE-1","correction_id":"c1","document":request()["document"]})),
                 None,
             )
             .await;
@@ -376,7 +374,7 @@ async fn admission_cases(server: &Restate, mock: &wiremock::MockServer, lab: &Ar
             response.body["message"]
                 .as_str()
                 .expect("fault")
-                .contains("mutation unsupported"),
+                .contains("corrective issuance is unsupported"),
             "must refuse at capability boundary: {handler}"
         );
     }

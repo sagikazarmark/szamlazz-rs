@@ -612,8 +612,7 @@ impl Execution {
         {
             return Ok(response);
         }
-        #[cfg(feature = "test-util")]
-        if self.experimental_request_response
+        if self.config.order_execution.permits_replay()
             && kind == DocumentKind::Final
             && let Some(response) = self
                 .exclusivity(
@@ -638,8 +637,7 @@ impl Execution {
             return Ok(response);
         }
 
-        #[cfg(feature = "test-util")]
-        if self.experimental_request_response
+        if self.config.order_execution.permits_replay()
             && (kind == DocumentKind::Final || matches!(prepared.proforma, ProformaLink::Number(_)))
         {
             let slot = ExternalId::for_kind(
@@ -935,8 +933,7 @@ impl Execution {
                 let found = verify(ctx, self, format!("verify-proforma-{number}"), number)
                     .await
                     .map_err(|fault| identity.about(&prepared.order, fault))?;
-                #[cfg(feature = "test-util")]
-                if self.experimental_request_response
+                if self.config.order_execution.permits_replay()
                     && let QueryOutcome::Found(document) = &found
                     && document.carries_order(&prepared.order)
                     && document.document_type == DocumentType::Proforma
@@ -975,8 +972,7 @@ impl Execution {
 
         // Step 3: lookup, then decide on what it found.
         let found = self.lookup_step(ctx, order, &intent).await.map_err(about)?;
-        #[cfg(feature = "test-util")]
-        if self.experimental_request_response
+        if self.config.order_execution.permits_replay()
             && let LookupOutcome::Foreign(document) = &found
             && document.document_type == DocumentType::Proforma
         {
@@ -1018,8 +1014,7 @@ impl Execution {
         let order = order.clone();
         let our_numbers = intent.our_numbers.clone();
         let corrected_number = intent.corrected_number.clone();
-        #[cfg(feature = "test-util")]
-        let experimental = self.experimental_request_response;
+        let replay_enabled = self.config.order_execution.permits_replay();
         run_reading(
             ctx,
             format!("lookup-{kind}"),
@@ -1031,8 +1026,7 @@ impl Execution {
                     order: &order,
                     our_numbers: &our_numbers,
                 };
-                #[cfg(feature = "test-util")]
-                if experimental {
+                if replay_enabled {
                     return gateway.lookup_initial_ordinary(request).await;
                 }
                 let outcome = gateway.lookup(request).await?;
@@ -1080,8 +1074,7 @@ impl Execution {
             intent.corrected_number.as_deref(),
         )
         .map_err(|error| Fault::invalid_input(error.to_string()))?;
-        #[cfg(feature = "test-util")]
-        if self.experimental_request_response {
+        if self.config.order_execution.permits_replay() {
             let result = self
                 .ordinary_request_response(ctx, order, request, &intent.identity.external_id)
                 .await?;

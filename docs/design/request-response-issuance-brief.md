@@ -11,6 +11,13 @@ has now produced two distinct documents and cannot inherit that assumption.
 
 ## Solution
 
+Implementation update: the accepted operation subset is now selected through
+`WorkerConfig.order_execution = ReplayEnabled`, available without `test-util` on
+both native and Workers. Existing config defaults to `Protected`; Agent needs no
+selector. Correctives remain refused. ADR 0019's production-interface decision and
+`docs/operations/order-execution-transition.md` supersede the initial experimental
+selection and rollout questions below; corrective support remains undecided.
+
 Implement a bounded, experimental actual-service vertical slice for initial
 ordinary invoice issuance and reads under RequestResponse, following ADR 0019.
 Use fresh discovery before unfinished-write replay while retaining recorded

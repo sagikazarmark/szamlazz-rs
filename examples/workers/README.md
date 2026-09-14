@@ -1,11 +1,14 @@
 # Actual Order/Agent on Cloudflare Workers (#247)
 
-An **experimental**, explicitly selected endpoint for proforma creation/deletion and ordinary/prepayment/final invoices (including
+A shared-service endpoint explicitly selecting `OrderExecution::ReplayEnabled`,
+for proforma creation/deletion and ordinary/prepayment/final invoices (including
 exact-target reissue and pinned proforma conversion), Order/unmanaged Agent storno,
 credit-entry registration, reads and operator recovery.
 It embeds the real services, including input/money validation, account
 resolution, fresh guards, unresolved markers and read-only reconciliation.
-It does not approve additional mutation types or production migration. The ingress
+Corrective issuance is refused before provider I/O in this mode on either host.
+See the [deployment transition procedure](../../docs/operations/order-execution-transition.md)
+before changing an existing deployment's execution mode. The ingress
 gateway must authorize operator observation/recovery separately; request signatures
 authenticate Restate, not the recovery operator.
 
@@ -33,8 +36,18 @@ ordinary panic-abort behavior; a panic does not settle external effects.
 - **Variable `RESTATE_IDENTITY_KEY`**: the Restate environment's `publickeyv1_…` key.
   Required; the example never silently accepts unsigned SDK calls or discovery.
 
-Use `wrangler dev` / `wrangler deploy` with your chosen Wrangler version. Register
-the resulting endpoint with Restate. The local acceptance proxy is HTTP/1.1 and
+Use `wrangler dev` for local development. **Every production release, including
+same-mode releases, must have its own immutable Worker endpoint.** The fixed name
+in `wrangler.toml` is a development/example name, not a rolling production target.
+Deploy using a release-specific Worker name, for example
+`wrangler deploy --name billing-worker-r20260914-1`, and provision that Worker's
+own variables/secrets. Register its release-specific URL with Restate. Keep the
+previous Worker and its code/configuration available for retained invocations;
+never redeploy into an old release name or repoint its registered URL. Restate's
+deployment pin cannot preserve code behind a mutable Worker URL. The
+[transition procedure](../../docs/operations/order-execution-transition.md) covers
+mode changes, and ADR 0009's immutable-release rule applies to every release.
+The local acceptance proxy is HTTP/1.1 and
 registers with `use_http_11: true`; the deployed HTTPS route negotiates normally.
 The host consumes the entire SDK output during the fetch event; no detached SDK
 task or `waitUntil` continuation owns document work.
@@ -72,6 +85,10 @@ dependency; `rand`, `uuid`, `tracing-span-filter`, `rust_crypto` remain enabled.
 `http_server` is added only on native targets. Worker request-identity verification
 uses the Rust crypto backend. Runtime-independent Tokio utilities and task-local
 spans remain; Tokio socket/signal features are absent from this WASM build.
+Neither the regular example nor its acceptance build enables the library's
+`test-util` feature. The example sets `WorkerConfig.order_execution` explicitly;
+Agent requires no special selector. Acceptance-only routes/policies are controlled
+by this example's own `acceptance-tests` feature.
 
 ## One Számla Agent client, reqwest on both hosts
 
@@ -149,7 +166,7 @@ fake deduplication and deliberately surviving old execution. Those remain accept
 risks, not guarantees supplied by this hosting layer. Dagger `ci workers` builds
 both release variants and runs the workerd transport plus real-Restate checks.
 
-Remaining #247 gates: released operation capability contract, production settlement
-approval, old marker/operator recovery and producer/deployment migration. See
+Corrective replay remains unsupported. The SDK patch is still interim; deployment
+transitions require the documented inventory and immutable-routing procedure. See
 [ADR 0019](../../docs/adr/0019-request-response-ordinary-invoice-replay.md) and the
 [outcome table](../../docs/design/request-response-outcomes.md).

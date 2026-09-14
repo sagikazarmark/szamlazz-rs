@@ -1,10 +1,10 @@
-//! Isolated initial-ordinary-invoice Workers endpoint; see the adjacent README.
+//! Shared services with explicit replay-enabled Order execution; see the README.
 
 use http_body_util::BodyExt as _;
 use restate_szamlazz::{
     Agent, Order,
     account::{Accounts, StaticConfig, StaticResolver},
-    config::WorkerConfig,
+    config::{OrderExecution, WorkerConfig},
     restate_sdk::{
         self,
         endpoint::{HandleOptions, ProtocolMode},
@@ -60,15 +60,14 @@ async fn serve(
         .to_string()
         .parse()
         .map_err(|_| invalid("invalid namespace"))?;
-    let config = WorkerConfig::new(namespace);
+    let mut config = WorkerConfig::new(namespace);
+    config.order_execution = OrderExecution::ReplayEnabled;
     #[cfg(feature = "acceptance-tests")]
     let config = acceptance::config(config);
     let config = config
         .validate()
         .map_err(|_| invalid("invalid worker configuration"))?;
-    let order = Order::from_parts(accounts.clone(), config.clone())
-        .experimental_request_response()
-        .into_service_definition();
+    let order = Order::from_parts(accounts.clone(), config.clone()).into_service_definition();
     #[cfg(feature = "acceptance-tests")]
     let order = {
         let policy = restate_sdk::endpoint::HandlerOptions::default()

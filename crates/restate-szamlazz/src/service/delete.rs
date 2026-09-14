@@ -67,8 +67,7 @@ impl Execution {
             fault.message = format!("proforma {number}: {}", fault.message);
             about(fault)
         };
-        #[cfg(feature = "test-util")]
-        if self.experimental_request_response {
+        if self.config.order_execution.permits_replay() {
             let result = self
                 .request_response_delete(ctx, &order, &proforma_id, found, request)
                 .await?;

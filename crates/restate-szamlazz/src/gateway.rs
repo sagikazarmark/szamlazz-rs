@@ -422,7 +422,6 @@ pub enum CreateStepRequestError {
 }
 
 impl<'a> CreateStepRequest<'a> {
-    #[cfg(feature = "test-util")]
     pub(crate) fn prepayment_number(&self) -> Option<&str> {
         match &self.create.kind {
             szamlazz_agent::ops::invoice::InvoiceKind::Final {
@@ -433,7 +432,6 @@ impl<'a> CreateStepRequest<'a> {
             _ => None,
         }
     }
-    #[cfg(feature = "test-util")]
     pub(crate) fn proforma_number(&self) -> Option<&str> {
         self.create
             .kind
@@ -1331,7 +1329,6 @@ impl Gateway {
         self.lookup_inner(&request, false).instrument(span).await
     }
 
-    #[cfg(feature = "test-util")]
     pub(crate) async fn lookup_initial_ordinary(
         &self,
         request: LookupRequest<'_>,

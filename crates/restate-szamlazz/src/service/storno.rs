@@ -585,8 +585,7 @@ impl Execution {
         let operation = crate::contract::recovery::WriteOperation::Storno {
             number: number.clone(),
         };
-        #[cfg(feature = "test-util")]
-        if self.experimental_request_response {
+        if self.config.order_execution.permits_replay() {
             let result = self
                 .request_response_storno(ctx, &order, intent.as_step_request(), &found)
                 .await?;

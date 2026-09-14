@@ -14,8 +14,8 @@ default = []
 ## JSON Schema derivation for the contract types (OpenAPI via Restate discovery).
 schemars = ["dep:schemars", "restate-sdk/schemars"]
 ## Constructors that skip validation (`ValidatedWorkerConfig::unchecked`), for test
-## harnesses whose policies are sized for a mock, and the isolated #247
-## RequestResponse experiment. Never enable it in a production deployment.
+## harnesses whose policies are sized for a mock, and write interruption observers.
+## Execution selection is ordinary configuration; never enable test-util in production.
 test-util = []
 
 [dependencies]

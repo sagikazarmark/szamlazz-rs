@@ -1,4 +1,4 @@
-# Actual Order RequestResponse experiment (#247)
+# Actual Order RequestResponse acceptance (#247)
 
 Agent credit-entry scenarios are shared with the workerd suite in
 `tests/common/credit_scenarios.rs`: exact money and normal additive/replacement
@@ -36,10 +36,10 @@ The target is also selected by the nextest `e2e` profile used in CI. It contains
 no live provider test. Historical prototype and vendor evidence remain in
 [`../prototype_request_response`](../prototype_request_response/README.md).
 
-The actual `Order` and `Agent` are explicitly selected with
-`.experimental_request_response()` behind `test-util`; enable it on both services
-of an isolated experimental endpoint. Production constructors retain their current
-behavior. This is not yet a Workers adapter. The test host fully buffers both SDK
+The actual `Order` selects `WorkerConfig.order_execution = OrderExecution::ReplayEnabled`;
+Agent needs no selector. Existing configurations default to `Protected`. `test-util`
+is used by this native test solely for interruption observers. The separate Workers
+example and acceptance suite build without that library feature. This host fully buffers both SDK
 input and output and alternates two independent endpoint instances; ordinary SDK
 suspension cannot rely on streaming acknowledgements.
 
@@ -83,6 +83,5 @@ or exclude delayed effects. Production depends on the operator-confirmed provide
 duplicate-order setting, not the fake provider's toggle.
 
 The [outcome/clearance table](../../../../docs/design/request-response-outcomes.md)
-defines the experiment's conservative refusal and changed-guard behavior, operation
-restrictions, discriminator and transition boundary. Production approval, legacy
-recovery/migration and Workers runtime acceptance remain open in #247.
+defines conservative refusal and changed-guard behavior, operation restrictions,
+discriminator and transition boundary. See the [execution transition procedure](../../../../docs/operations/order-execution-transition.md).

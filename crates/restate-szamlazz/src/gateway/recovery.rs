@@ -192,7 +192,6 @@ impl WriteResult {
 impl Gateway {
     /// Experimental Order storno: settle existing evidence before inspecting
     /// fresh send guards; only the pinned live original can authorize replay.
-    #[cfg(feature = "test-util")]
     pub(crate) async fn request_response_storno(
         &self,
         request: super::StornoStepRequest<'_>,
@@ -293,7 +292,6 @@ impl Gateway {
     }
     /// #247 only: open-run replay may submit again after fresh absence and
     /// guards. Kept distinct from the public consumed-permission contract.
-    #[cfg(feature = "test-util")]
     #[allow(
         clippy::too_many_lines,
         reason = "keep fresh target, cross-kind and pinned proforma guards in send order"
@@ -314,7 +312,7 @@ impl Gateway {
             IssuedKind::Invoice | IssuedKind::Proforma | IssuedKind::Prepayment | IssuedKind::Final
         ) || request.corrected_number.is_some()
         {
-            return WriteResult::unresolved("unsupported experimental ordinary intent");
+            return WriteResult::unresolved("unsupported replay-enabled issuance intent");
         }
         // After admission a different matching holder is replacement evidence,
         // not a new target to send past. The expected old holder alone can permit
@@ -883,7 +881,6 @@ impl Gateway {
 
 /// Positive issuance alone clears under accepted ordinary replay risk. A later
 /// refusal/collision says nothing about an interrupted earlier execution.
-#[cfg(feature = "test-util")]
 fn ordinary_result(
     result: Result<CreateOutcome, super::Unconfirmed>,
     namespace: &str,

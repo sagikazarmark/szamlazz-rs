@@ -10,11 +10,11 @@ crate-type = ["cdylib"]
 [features]
 acceptance-tests = []
 
-# Keep the interim SDK override local to this experimental host.
+# Keep the interim SDK override local to this host example.
 [workspace]
 
 [dependencies]
-restate-szamlazz = { path = "../../crates/restate-szamlazz", features = ["test-util"] }
+restate-szamlazz = { path = "../../crates/restate-szamlazz" }
 worker = { version = "=0.8.5", features = ["http"] }
 http-body-util = "0.1"
 serde_json = "1"

@@ -209,8 +209,12 @@ impl Order {
         ctx: ObjectContext<'_>,
         request: Body<CorrectRequest>,
     ) -> HandlerResult<Json<CreateResponse>> {
-        #[cfg(feature = "test-util")]
-        self.require_supported_mutation()?;
+        if self.parts.config.order_execution.permits_replay() {
+            return Err(super::support::Fault::invalid_input(
+                "corrective issuance is unsupported with replay_enabled Order execution",
+            )
+            .into());
+        }
         let request = request.into_request()?;
         let order = order_key(ctx.key())?;
         super::recovery::guard(&ctx).await?;

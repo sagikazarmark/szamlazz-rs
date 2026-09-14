@@ -25,7 +25,6 @@ use crate::identity::{ExternalId, OrderKey};
 
 const STATE: &str = "unresolved-write";
 
-#[cfg(feature = "test-util")]
 #[derive(Clone, Copy)]
 enum ReplayWrite {
     Create,
@@ -33,7 +32,6 @@ enum ReplayWrite {
     Storno,
 }
 
-#[cfg(feature = "test-util")]
 impl ReplayWrite {
     const fn step(self) -> &'static str {
         match self {
@@ -56,13 +54,6 @@ impl ReplayWrite {
 /// fail decoding rather than become ordinary resend permission.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(transparent)]
-#[cfg_attr(
-    not(feature = "test-util"),
-    allow(
-        dead_code,
-        reason = "registered privacy-scanned experimental journal type"
-    )
-)]
 pub(super) struct OrdinaryIntent {
     marker: UnresolvedWrite,
 }
@@ -80,10 +71,6 @@ impl<'de> serde::Deserialize<'de> for OrdinaryIntent {
 }
 
 impl OrdinaryIntent {
-    #[cfg_attr(
-        not(feature = "test-util"),
-        allow(dead_code, reason = "experimental constructor")
-    )]
     pub(super) fn new(mut marker: UnresolvedWrite) -> Self {
         if marker.execution_contract.is_none() {
             marker.execution_contract = Some(
@@ -95,7 +82,6 @@ impl OrdinaryIntent {
 }
 
 /// Interruption boundaries exposed only for real-runtime protocol tests.
-#[cfg(feature = "test-util")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteCheckpoint {
     /// Before the marker command.
@@ -103,6 +89,7 @@ pub enum WriteCheckpoint {
     /// After the marker command, before acknowledged arming.
     AfterMarker,
     /// After acknowledged arming, before consuming permission.
+    #[cfg(feature = "test-util")]
     Armed,
     /// Experimental ordinary write: fresh target and guards passed, before send.
     OrdinaryGuardsPassed,
@@ -113,8 +100,10 @@ pub enum WriteCheckpoint {
     /// After recorded settlement, before clearing the marker.
     Settled,
     /// After recorded document verification, before recording recovery.
+    #[cfg(feature = "test-util")]
     RecoveryVerified,
     /// After recorded recovery evidence, before clearing its marker.
+    #[cfg(feature = "test-util")]
     RecoveryRecorded,
 }
 
@@ -160,8 +149,7 @@ impl Order {
                         marker: Box::new(marker),
                     }
                 } else {
-                    #[cfg(feature = "test-util")]
-                    if self.experimental_request_response
+                    if self.parts.config.order_execution.permits_replay()
                         && let Ok(marker) = serde_json::from_slice::<serde_json::Value>(&raw)
                     {
                         return Ok(UnresolvedObservation::Other {
@@ -504,7 +492,6 @@ pub(super) async fn guard(ctx: &ObjectContext<'_>) -> Result<(), HandlerError> {
 }
 
 impl Execution {
-    #[cfg(feature = "test-util")]
     pub(super) async fn request_response_storno(
         &self,
         ctx: &ObjectContext<'_>,
@@ -554,7 +541,6 @@ impl Execution {
     }
     /// Separate admission/run identity for the isolated ordinary experiment.
     /// Every non-positive result after the barrier retains earlier uncertainty.
-    #[cfg(feature = "test-util")]
     pub(super) async fn ordinary_request_response(
         &self,
         ctx: &ObjectContext<'_>,
@@ -616,7 +602,6 @@ impl Execution {
         .await
     }
 
-    #[cfg(feature = "test-util")]
     pub(super) async fn request_response_delete(
         &self,
         ctx: &ObjectContext<'_>,
@@ -679,7 +664,6 @@ impl Execution {
         }).await
     }
 
-    #[cfg(feature = "test-util")]
     #[allow(
         clippy::too_many_arguments,
         reason = "one shared durable boundary for the two approved mutation contracts"
@@ -712,7 +696,7 @@ impl Execution {
         let marker = &intent.marker;
         let uncertain = |error: TerminalError| {
             Fault::outcome_unknown(
-                "experimental ordinary write interrupted at durable await; marker retained",
+                "replay-enabled Order write interrupted at durable await; marker retained",
             )
             .with_run_cause(&error)
             .about(
@@ -882,6 +866,15 @@ impl Execution {
         self.checkpoint(order, WriteCheckpoint::Settled).await;
         ctx.clear(STATE);
         Ok(result)
+    }
+
+    #[cfg(not(feature = "test-util"))]
+    #[allow(
+        clippy::unused_self,
+        reason = "same call sites as the feature-gated interruption observer"
+    )]
+    fn checkpoint(&self, _order: &OrderKey, _point: WriteCheckpoint) -> std::future::Ready<()> {
+        std::future::ready(())
     }
 
     #[cfg(feature = "test-util")]

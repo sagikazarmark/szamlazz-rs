@@ -1,5 +1,32 @@
 # RequestResponse ordinary issuance with explicit replay risk
 
+## Production interface decision (supersedes experimental selection below)
+
+The user approved an explicit host-independent Order execution setting, with
+corrective issuance unavailable in replay-enabled execution. `WorkerConfig` now
+accepts `order_execution = "protected"` (default) or `"replay_enabled"`, represented
+by `config::OrderExecution`. Existing constructors and omitted config preserve the
+protected protocol. Agent has no execution selector. This is one shared service
+implementation with an explicit financial execution contract, not target-based
+semantics or an SDK protocol-mode switch.
+
+Replay-enabled production code supports the operation-specific rules agreed below
+without `test-util`. The Workers example selects this setting and builds without
+test utilities; only mock policies/routes remain behind the example's own
+acceptance feature. Pre-release experimental builder methods are removed rather
+than leaving a second configuration source. Test observers and unchecked config
+remain feature-gated. The corrective handler rejects replay-enabled requests with
+the existing `invalid_input` fault before account/provider operations on either host.
+No corrective duplicate-risk acceptance is implied.
+
+This promotion preserves marker tokens and durable step sequences. It does not
+make existing journals replay-compatible across modes or releases. Use the
+[execution-mode transition procedure](../operations/order-execution-transition.md):
+new immutable endpoint, old code/config retained, all producers quiesced, old work
+settled, markers/unfinished invocations inventoried, then registration switched.
+Unknown state never grants new permission. Corrective support remains a separate
+decision; CI runs independently and is not awaited as part of this decision.
+
 Accepted direction 2026-09-14, following #247's runtime and vendor prototypes;
 **implemented only as an isolated `test-util` experiment, not a release-wide mutation contract**. RequestResponse is
 required. For ordinary invoice issuance, replace execution-local acknowledged

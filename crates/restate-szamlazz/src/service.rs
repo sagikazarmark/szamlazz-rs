@@ -72,8 +72,6 @@ mod agent;
 mod body;
 mod create;
 mod delete;
-#[cfg(feature = "test-util")]
-mod experimental;
 mod handlers;
 mod ingress;
 #[cfg(test)]
@@ -134,8 +132,6 @@ impl Parts {
 pub struct Order {
     parts: Parts,
     #[cfg(feature = "test-util")]
-    experimental_request_response: bool,
-    #[cfg(feature = "test-util")]
     write_observer: Option<std::sync::Arc<dyn WriteObserver>>,
 }
 
@@ -151,12 +147,13 @@ impl Order {
     /// Builds the object over the account resolver and credential store in
     /// `accounts` and the validated deployment-level `config`
     /// ([`WorkerConfig::validate`](crate::config::WorkerConfig::validate)).
+    /// The configuration's [`OrderExecution`](crate::config::OrderExecution)
+    /// defaults to `Protected`; selecting `ReplayEnabled` is an explicit
+    /// deployment-level acceptance of unfinished-write resubmission risk.
     #[must_use]
     pub fn from_parts(accounts: Accounts, config: ValidatedWorkerConfig) -> Self {
         Self {
             parts: Parts { accounts, config },
-            #[cfg(feature = "test-util")]
-            experimental_request_response: false,
             #[cfg(feature = "test-util")]
             write_observer: None,
         }
@@ -188,7 +185,6 @@ impl Order {
                 let execution = {
                     let mut execution = execution;
                     execution.write_observer.clone_from(&self.write_observer);
-                    execution.experimental_request_response = self.experimental_request_response;
                     execution
                 };
                 body(execution)

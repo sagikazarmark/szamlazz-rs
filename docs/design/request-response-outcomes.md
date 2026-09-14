@@ -1,5 +1,12 @@
 # Experimental ordinary issuance: outcomes and marker clearance
 
+**Current selection:** `WorkerConfig.order_execution` chooses `protected` (default)
+or `replay_enabled` on either host, without `test-util`. The experimental selection
+history below is superseded by this supported configuration. Agent has no selector;
+only corrective issuance is unavailable under replay-enabled Order execution.
+The per-operation outcome/clearance rules remain unchanged. See the
+[execution transition procedure](../operations/order-execution-transition.md).
+
 #247's first actual-service slice, 2026-09-14. This is the implemented experiment's
 table, pending production approval under [ADR 0019](../adr/0019-request-response-ordinary-invoice-replay.md).
 The account must have duplicate-order checking enabled, independently confirmed
