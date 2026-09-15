@@ -42,7 +42,7 @@ restate-sdk = { workspace = true, features = ["http_server"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 jiff = { workspace = true, features = ["js"] }
 send_wrapper = { version = "0.6", features = ["futures"] }
-gloo-timers = { version = "0.3", features = ["futures"] }
+gloo-timers = { version = "0.4", features = ["futures"] }
 futures-util = "0.3"
 
 [dev-dependencies]
