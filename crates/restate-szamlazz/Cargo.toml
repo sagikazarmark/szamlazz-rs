@@ -42,7 +42,7 @@ restate-sdk = { workspace = true, features = ["http_server"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 jiff = { workspace = true, features = ["js"] }
 send_wrapper = { version = "0.6", features = ["futures"] }
-gloo-timers = { version = "0.3", features = ["futures"] }
+gloo-timers = { version = "0.4", features = ["futures"] }
 futures-util = "0.3"
 
 [dev-dependencies]
@@ -59,7 +59,7 @@ uuid = { version = "1", features = ["v4"] }
 restate-szamlazz = { path = ".", features = ["test-util"] }
 # The Restate half of the e2e harness (server gate, deployment, ingress,
 # admin API, journal, the step-name table check).
-restate-e2e-harness = "0.1.0"
+restate-e2e-harness = "0.3.0"
 static_assertions = "1.1.0"
 # `sync` for the e2e harness's fetch hold and send counter (`watch` channels).
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util"] }
